@@ -28,29 +28,80 @@ def load(rel):
     return json.loads((ROOT / rel).read_text(encoding="utf-8"))
 
 
-def passed_task():
-    """DEV-0001 carried through to 'passed' with evidence for every criterion.
+EVIDENCE_DIR = ROOT / ".test-evidence"  # gitignored; created and removed by this module
+WORKER_COMMIT = "a" * 40
 
-    Test data only: the evidence entries describe a hypothetical run and are
-    never written to examples/.
+
+def tearDownModule():
+    import shutil
+    shutil.rmtree(EVIDENCE_DIR, ignore_errors=True)
+
+
+def run_record(role, agent, cli, path, session, target=None, result=None):
+    return {
+        "run_schema_version": "0.2", "run_id": f"DEV-0001-{role}-20261010T010000Z", "task_id": "DEV-0001",
+        "task_path": "examples/development/task.json", "task_type": "development", "role": role, "agent": agent,
+        "status": "completed", "stop_reason": None, "cli": {"name": cli, "path": path, "version": "1.0"},
+        "auth": {"checked": True, "logged_in": True, "method": "oauth_token", "provider": "firstParty"},
+        "argv": [], "model_requested": None, "models_reported": None, "session_id_reported": session,
+        "cost_usd_reported": None, "num_turns_reported": None, "base_commit": "b" * 40,
+        "target_commit": target, "result_commit": result, "branch": None, "task_sha256_at_start": "c" * 64,
+        "retry_count_at_start": 0, "started_at": "2026-10-10T01:00:00Z", "ended_at": "2026-10-10T01:01:00Z",
+        "duration_s": 60.0, "exit_code": 0, "timeout_s": 900, "changed_files": [], "files": {},
+        "security": {"secret_hits": [], "out_of_scope_paths": [],
+                     "workspace_modified_by_reviewer": False if role == "reviewer" else None},
+    }
+
+
+def passed_task(mutate=None):
+    """DEV-0001 carried through to 'passed', with real files whose hashes the
+    validator checks: worker, check and reviewer run records, a check log and a
+    review. `mutate(records)` may alter the run records before they are written.
+
+    Test data only; the files live under .test-evidence/ and are deleted.
     """
+    import tempfile
+    EVIDENCE_DIR.mkdir(exist_ok=True)
+    d = Path(tempfile.mkdtemp(dir=EVIDENCE_DIR))
+    records = {
+        "worker": run_record("worker", "claude-code", "claude", "/usr/bin/claude", "s-worker", result=WORKER_COMMIT),
+        "check": run_record("check", "aiwos-runner", "bash", "/bin/bash", None, target=WORKER_COMMIT),
+        "reviewer": run_record("reviewer", "codex-cli", "codex", "/usr/bin/codex", "s-review", target=WORKER_COMMIT),
+    }
+    if mutate:
+        mutate(records)
+    files = {f"{k}.json": json.dumps(v).encode() for k, v in records.items()}
+    files["ac.log"] = b"Ran 2 tests\nOK\n"
+    files["review.json"] = b'{"summary": "ok"}'
+    for name, data in files.items():
+        (d / name).write_bytes(data)
+
+    def ev(eid, kind, name, by, cids, **extra):
+        e = {"id": eid, "kind": kind, "path": (d / name).relative_to(ROOT).as_posix(),
+             "sha256": vt.file_sha256(d / name), "produced_by": by, "created_at": "2026-10-10T01:00:00Z",
+             "criterion_ids": cids}
+        e.update(extra)
+        return e
+
     t = load("examples/development/task.json")
     t["status"] = "passed"
     t["evidence"] = [
-        {"id": "E1", "kind": "command_output", "command": "python3 -m unittest -v", "exit_code": 0,
-         "produced_by": "codex-cli", "created_at": "2026-10-10T01:00:00Z", "criterion_ids": ["AC1", "AC2"]},
-        {"id": "E2", "kind": "review_note", "summary": "tests added, unsupported lang documented",
-         "produced_by": "codex-cli", "created_at": "2026-10-10T01:05:00Z", "criterion_ids": ["AC3"]},
+        ev("W1", "run_record", "worker.json", "aiwos-runner", []),
+        ev("C1", "run_record", "check.json", "aiwos-runner", []),
+        ev("E1", "command_output", "ac.log", "aiwos-runner", ["AC1", "AC2"], command="python3 -m unittest -v",
+           exit_code=0),
+        ev("R1", "run_record", "reviewer.json", "aiwos-runner", []),
+        ev("E2", "review_note", "review.json", "codex-cli", ["AC3"]),
     ]
     t["quality"] = {
-        "spec_conformance": {"verdict": "PASS", "evidence_ids": ["E1"], "judged_by": "codex-cli"},
-        "correctness": {"verdict": "PASS", "evidence_ids": ["E1"], "judged_by": "codex-cli"},
-        "completeness": {"verdict": "PASS", "evidence_ids": ["E2"], "judged_by": "codex-cli"},
+        "spec_conformance": {"verdict": "PASS", "evidence_ids": ["E1"], "judged_by": "aiwos-runner"},
+        "correctness": {"verdict": "PASS", "evidence_ids": ["E1"], "judged_by": "aiwos-runner"},
+        "completeness": {"verdict": "PASS", "evidence_ids": ["E2", "R1"], "judged_by": "codex-cli"},
     }
     t["history"] += [
-        {"from": "ready", "to": "in_progress", "at": "2026-10-10T00:10:00Z", "by": "claude-code"},
-        {"from": "in_progress", "to": "review", "at": "2026-10-10T00:50:00Z", "by": "claude-code"},
-        {"from": "review", "to": "passed", "at": "2026-10-10T01:10:00Z", "by": "codex-cli"},
+        {"from": "ready", "to": "in_progress", "at": "2026-10-10T00:10:00Z", "by": "aiwos-runner"},
+        {"from": "in_progress", "to": "review", "at": "2026-10-10T00:50:00Z", "by": "aiwos-runner"},
+        {"from": "review", "to": "passed", "at": "2026-10-10T01:10:00Z", "by": "aiwos-runner"},
     ]
     return t
 
@@ -71,8 +122,24 @@ class ValidTasks(unittest.TestCase):
     def test_both_samples_share_one_contract(self):
         dev = load("examples/development/task.json")
         doc = load("examples/document-compare/task.json")
-        self.assertEqual(set(dev), set(doc))
+        required = set(load("contracts/task.schema.json")["required"])
+        self.assertLessEqual(required, set(dev))
+        self.assertLessEqual(required, set(doc))
         self.assertNotEqual(dev["task_type"], doc["task_type"])
+
+    def test_swap_sample_differs_only_in_roles(self):
+        dev = load("examples/development/task.json")
+        swap = load("examples/development/task-swap.json")
+        self.assertEqual((swap["assigned_agent"], swap["reviewer"]), (dev["reviewer"], dev["assigned_agent"]))
+        for key in ("acceptance_criteria", "failure_conditions", "constraints", "inputs", "allowed_paths",
+                    "max_retries"):
+            self.assertEqual(dev[key], swap[key], key)
+
+    def test_v01_contract_still_valid(self):
+        t = load("examples/development/task.json")
+        t["schema_version"] = "0.1"
+        del t["allowed_paths"]
+        self.assertValid(t)
 
     def test_fully_evidenced_pass(self):
         self.assertValid(passed_task())
@@ -172,6 +239,76 @@ class InvalidTasks(unittest.TestCase):
         t["quality"]["correctness"]["judged_by"] = "claude-code"
         self.assertRejected(t, r"self-report is not a pass")
 
+    # --- 0.2: hashes and independence from run records ---
+    def test_hash_mismatch(self):
+        t = passed_task()
+        next(e for e in t["evidence"] if e["id"] == "E1")["sha256"] = "0" * 64
+        self.assertRejected(t, r"does not match the recorded hash")
+
+    def test_hashed_evidence_file_missing(self):
+        t = passed_task()
+        next(e for e in t["evidence"] if e["id"] == "E1")["path"] = "runs/none/missing.log"
+        self.assertRejected(t, r"does not exist")
+
+    def test_pass_on_unhashed_evidence(self):
+        t = passed_task()
+        del next(e for e in t["evidence"] if e["id"] == "E1")["sha256"]
+        self.assertRejected(t, r"has no verified path \+ sha256")
+
+    def test_hash_without_path(self):
+        t = load("examples/development/task.json")
+        t["evidence"] = [{"id": "E1", "kind": "log", "sha256": "0" * 64, "produced_by": "human",
+                          "created_at": "2026-10-10T01:00:00Z", "criterion_ids": []}]
+        self.assertRejected(t, r"'path' is a required property")
+
+    def test_runner_cannot_be_assigned(self):
+        t = load("examples/development/task.json")
+        t["assigned_agent"] = "aiwos-runner"
+        self.assertRejected(t, r"schema: assigned_agent")
+
+    def test_pass_without_reviewer_run(self):
+        t = passed_task()
+        t["evidence"] = [e for e in t["evidence"] if e["id"] != "R1"]
+        t["quality"]["completeness"]["evidence_ids"] = ["E2"]
+        self.assertRejected(t, r"no completed reviewer run by 'codex-cli'")
+
+    def test_review_of_a_different_commit(self):
+        t = passed_task(lambda r: r["reviewer"].update(target_commit="d" * 40))
+        self.assertRejected(t, r"on the worker's result commit")
+
+    def test_same_session_for_worker_and_reviewer(self):
+        t = passed_task(lambda r: r["reviewer"].update(session_id_reported="s-worker"))
+        self.assertRejected(t, r"same session id")
+
+    def test_unreported_session_is_unproven(self):
+        t = passed_task(lambda r: r["reviewer"].update(session_id_reported=None))
+        self.assertRejected(t, r"independence is unproven")
+
+    def test_same_executable_under_two_labels(self):
+        t = passed_task(lambda r: r["reviewer"]["cli"].update(path="/usr/bin/claude"))
+        self.assertRejected(t, r"do not name two different executables")
+
+    def test_reviewer_ran_wrong_cli(self):
+        t = passed_task(lambda r: r["reviewer"]["cli"].update(name="claude"))
+        self.assertRejected(t, r"ran 'claude', not codex")
+
+    def test_reviewer_modified_tree(self):
+        t = passed_task(lambda r: r["reviewer"]["security"].update(workspace_modified_by_reviewer=True))
+        self.assertRejected(t, r"did not prove it left the reviewed tree unchanged")
+
+    def test_pass_without_check_run(self):
+        t = passed_task(lambda r: r["check"].update(target_commit="d" * 40))
+        self.assertRejected(t, r"no completed check run")
+
+    def test_malformed_run_record(self):
+        t = passed_task(lambda r: r["worker"].pop("auth"))
+        self.assertRejected(t, r"run record 'W1' is malformed")
+
+    def test_human_reviewer_needs_human_note(self):
+        t = passed_task()
+        t["reviewer"] = "human"
+        self.assertRejected(t, r"no review_note produced_by 'human'")
+
     def test_passed_with_unverified_dimension(self):
         t = passed_task()
         t["quality"]["completeness"] = {"verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": None}
@@ -179,7 +316,7 @@ class InvalidTasks(unittest.TestCase):
 
     def test_passed_with_uncovered_criterion(self):
         t = passed_task()
-        t["evidence"][1]["criterion_ids"] = []
+        next(e for e in t["evidence"] if e["id"] == "E2")["criterion_ids"] = []
         self.assertRejected(t, r"criterion 'AC3' has no evidence")
 
     def test_dangling_evidence_reference(self):
@@ -189,7 +326,7 @@ class InvalidTasks(unittest.TestCase):
 
     def test_evidence_for_unknown_criterion(self):
         t = passed_task()
-        t["evidence"][0]["criterion_ids"].append("AC9")
+        next(e for e in t["evidence"] if e["id"] == "E1")["criterion_ids"].append("AC9")
         self.assertRejected(t, r"unknown criterion 'AC9'")
 
     def test_duplicate_ids(self):

@@ -69,6 +69,12 @@ if command -v claude >/dev/null 2>&1; then
   help_has claude "--permission-mode" && modes="$modes, --permission-mode"
   help_has claude "--disallowedTools" && modes="$modes, --disallowedTools"
   row claude-run optional info "per --help: $modes"
+  # Only the loggedIn flag and method are read; the account is never printed.
+  if method="$(bounded claude auth status 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("authMethod") or "?"); sys.exit(0 if d.get("loggedIn") else 1)' 2>/dev/null)"; then
+    row claude-auth optional ok "logged in ($method)"
+  else
+    row claude-auth optional NO "not logged in (run: claude auth login)"
+  fi
 else
   row claude optional absent "Claude Code CLI not found"
 fi
@@ -81,6 +87,11 @@ if command -v codex >/dev/null 2>&1; then
   help_has codex "--sandbox" && modes="$modes, --sandbox"
   help_has codex "--ask-for-approval" && modes="$modes, --ask-for-approval"
   row codex-run optional info "per --help: $modes"
+  if bounded codex login status >/dev/null 2>&1; then
+    row codex-auth optional ok "logged in"
+  else
+    row codex-auth optional NO "not logged in (run: codex login --device-auth)"
+  fi
 else
   row codex optional absent "Codex CLI not found"
 fi

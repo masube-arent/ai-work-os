@@ -1,0 +1,334 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/masube-arent/ai-work-os/contracts/run.schema.json",
+  "title": "AI WORK OS run record",
+  "description": "runs/<task_id>/<run_id>/run.json. Written by scripts/aiwos.py, one per execution. A value the CLI did not report is null, never a guess and never 0.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "run_schema_version",
+    "run_id",
+    "task_id",
+    "task_path",
+    "task_type",
+    "role",
+    "agent",
+    "status",
+    "stop_reason",
+    "cli",
+    "auth",
+    "argv",
+    "model_requested",
+    "models_reported",
+    "session_id_reported",
+    "cost_usd_reported",
+    "num_turns_reported",
+    "base_commit",
+    "target_commit",
+    "result_commit",
+    "branch",
+    "task_sha256_at_start",
+    "retry_count_at_start",
+    "started_at",
+    "ended_at",
+    "duration_s",
+    "exit_code",
+    "timeout_s",
+    "changed_files",
+    "files",
+    "security"
+  ],
+  "properties": {
+    "run_schema_version": {
+      "const": "0.2"
+    },
+    "run_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*-[0-9]{4,}-[a-z]+-[0-9]{8}T[0-9]{6}Z$"
+    },
+    "task_id": {
+      "type": "string"
+    },
+    "task_path": {
+      "type": "string",
+      "description": "Repo-relative path of the task contract the run was started from."
+    },
+    "task_type": {
+      "type": "string"
+    },
+    "role": {
+      "enum": [
+        "worker",
+        "reviewer",
+        "check"
+      ]
+    },
+    "agent": {
+      "enum": [
+        "claude-code",
+        "codex-cli",
+        "aiwos-runner"
+      ]
+    },
+    "status": {
+      "enum": [
+        "completed",
+        "failed",
+        "timeout",
+        "interrupted",
+        "blocked",
+        "security_violation",
+        "scope_violation"
+      ],
+      "description": "completed: the process ran to the end (says nothing about quality). blocked: refused before start (auth, contract, lock)."
+    },
+    "stop_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cli": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "path",
+        "version"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "checked",
+        "logged_in",
+        "method",
+        "provider"
+      ],
+      "properties": {
+        "checked": {
+          "type": "boolean"
+        },
+        "logged_in": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "method": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "argv": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "model_requested": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "models_reported": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "model",
+          "input_tokens",
+          "output_tokens"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "input_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "output_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      }
+    },
+    "session_id_reported": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "cost_usd_reported": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "Figure the CLI printed (list-price basis for Claude Code). Not an invoice and not proof of billing."
+    },
+    "num_turns_reported": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "base_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "target_commit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "result_commit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "branch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "task_sha256_at_start": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "retry_count_at_start": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "started_at": {
+      "type": "string"
+    },
+    "ended_at": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "duration_s": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "timeout_s": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "changed_files": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "files": {
+      "type": "object",
+      "description": "File name in the run directory -> sha256 of its bytes.",
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{64}$"
+      }
+    },
+    "security": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "secret_hits",
+        "out_of_scope_paths",
+        "workspace_modified_by_reviewer"
+      ],
+      "properties": {
+        "secret_hits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "line",
+              "pattern"
+            ],
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "line": {
+                "type": "integer"
+              },
+              "pattern": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "out_of_scope_paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "workspace_modified_by_reviewer": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

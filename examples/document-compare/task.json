@@ -29,7 +29,9 @@
       "id": "AC1",
       "description": "出力が「区分（追加/削除/変更）・旧版行・新版行・内容」の表形式である",
       "dimension": "spec_conformance",
-      "verification": { "method": "inspection" }
+      "verification": {
+        "method": "inspection"
+      }
     },
     {
       "id": "AC2",
@@ -53,23 +55,53 @@
     }
   ],
   "failure_conditions": [
-    { "id": "FC1", "description": "機械 diff にある差異を見落とした", "on_trigger": "rework" },
-    { "id": "FC2", "description": "存在しない差異を報告した", "on_trigger": "rework" },
-    { "id": "FC3", "description": "入力文書が変更された", "on_trigger": "escalate" }
+    {
+      "id": "FC1",
+      "description": "機械 diff にある差異を見落とした",
+      "on_trigger": "rework"
+    },
+    {
+      "id": "FC2",
+      "description": "存在しない差異を報告した",
+      "on_trigger": "rework"
+    },
+    {
+      "id": "FC3",
+      "description": "入力文書が変更された",
+      "on_trigger": "escalate"
+    }
   ],
   "assigned_agent": "codex-cli",
   "reviewer": "claude-code",
   "status": "ready",
   "evidence": [],
   "quality": {
-    "spec_conformance": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null },
-    "correctness": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null },
-    "completeness": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null }
+    "spec_conformance": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    },
+    "correctness": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    },
+    "completeness": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    }
   },
   "retry_count": 0,
   "max_retries": 1,
   "escalation_reason": null,
   "history": [
-    { "from": "draft", "to": "ready", "at": "2026-10-10T00:00:00Z", "by": "human", "note": "比較対象と受入基準を確認" }
+    {
+      "from": "draft",
+      "to": "ready",
+      "at": "2026-10-10T00:00:00Z",
+      "by": "claude-code",
+      "note": "Claude Code が起票し ready にした。Phase 1 では by: human と記録したが、人間による受入基準の確認は行われていない（Phase 2 で訂正）。時刻 00:00:00Z は Phase 1 作成時の概算（日付のみ正確）"
+    }
   ]
 }

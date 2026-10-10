@@ -1,0 +1,35 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["criteria", "defects", "summary"],
+  "properties": {
+    "criteria": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion_id", "verdict", "reason"],
+        "properties": {
+          "criterion_id": { "type": "string" },
+          "verdict": { "enum": ["PASS", "FAIL", "UNVERIFIED"] },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "defects": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "dimension", "file", "description"],
+        "properties": {
+          "severity": { "enum": ["blocker", "high", "medium", "low"] },
+          "dimension": { "enum": ["spec_conformance", "correctness", "completeness"] },
+          "file": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      }
+    },
+    "summary": { "type": "string" }
+  }
+}

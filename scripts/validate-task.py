@@ -13,13 +13,16 @@ Two layers run on every file:
 Exit 0 when every file is valid, 1 when any is invalid, 2 on usage or
 environment errors (for example jsonschema not installed).
 """
+import hashlib
 import json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SCHEMA_PATH = ROOT / "contracts" / "task.schema.json"
+RUN_SCHEMA_PATH = ROOT / "contracts" / "run.schema.json"
 PROFILES_DIR = ROOT / "profiles"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -41,6 +44,22 @@ TRANSITIONS = {
 }
 DIMENSIONS = ("spec_conformance", "correctness", "completeness")
 HUMAN_ONLY_TARGETS = {"accepted"}
+# The executable a run record must name for each agent. An agent label alone
+# proves nothing; the record of what actually ran is what is checked.
+CLI_OF_AGENT = {"claude-code": "claude", "codex-cli": "codex"}
+
+
+def file_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 16), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def repo_relative(value):
+    path = Path(value)
+    return not path.is_absolute() and ".." not in path.parts
 
 
 def load_schema_validator():
@@ -108,13 +127,28 @@ def semantic_errors(task):
             elif not (ROOT / path).is_file():
                 errors.append(f"input '{inp['id']}': file '{inp['location']}' does not exist")
 
-    # Evidence: references resolve, timestamps parse.
+    for prefix in task.get("allowed_paths", []):
+        if not repo_relative(prefix):
+            errors.append(f"allowed_paths entry '{prefix}' must be repo-relative")
+
+    # Evidence: references resolve, timestamps parse, hashes match the bytes on disk.
+    hash_ok = set()
     for ev in task["evidence"]:
         for cid in ev["criterion_ids"]:
             if cid not in criteria:
                 errors.append(f"evidence '{ev['id']}' refers to unknown criterion '{cid}'")
         if parse_datetime(ev["created_at"]) is None:
             errors.append(f"evidence '{ev['id']}': created_at is not an ISO 8601 date-time with timezone")
+        if "path" in ev and not repo_relative(ev["path"]):
+            errors.append(f"evidence '{ev['id']}': path must be repo-relative")
+        elif "sha256" in ev:
+            target = ROOT / ev["path"]
+            if not target.is_file():
+                errors.append(f"evidence '{ev['id']}': file '{ev['path']}' does not exist")
+            elif file_sha256(target) != ev["sha256"]:
+                errors.append(f"evidence '{ev['id']}': sha256 of '{ev['path']}' does not match the recorded hash")
+            else:
+                hash_ok.add(ev["id"])
 
     # Quality: three separate judgments, never self-certified, never without evidence.
     for dim in DIMENSIONS:
@@ -136,6 +170,13 @@ def semantic_errors(task):
         for cid in criteria:
             if cid not in covered:
                 errors.append(f"status '{status}' but acceptance criterion '{cid}' has no evidence")
+        # 0.2: evidence behind a PASS must be a file whose hash was verified above.
+        for dim in DIMENSIONS:
+            for eid in task["quality"][dim]["evidence_ids"]:
+                if eid in evidence and eid not in hash_ok:
+                    errors.append(f"status '{status}': evidence '{eid}' cited by quality.{dim} "
+                                  "has no verified path + sha256")
+        errors.extend(independence_errors(task))
 
     # Retry limit.
     if task["retry_count"] > task["max_retries"]:
@@ -147,6 +188,76 @@ def semantic_errors(task):
     for lineno, name in find_in_text(json.dumps(task, ensure_ascii=False, indent=1)):
         errors.append(f"value matching '{name}' found; credentials must not appear in a task contract")
 
+    return errors
+
+
+def load_run_records(task):
+    """Run records cited as evidence, parsed. Missing or unreadable files are
+    reported by the hash check, so they are skipped here."""
+    records = []
+    for ev in task["evidence"]:
+        if ev["kind"] != "run_record" or not repo_relative(ev.get("path", "")):
+            continue
+        try:
+            records.append((ev["id"], json.loads((ROOT / ev["path"]).read_text(encoding="utf-8"))))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return records
+
+
+def independence_errors(task):
+    """A pass needs proof that review was done by someone else, on the exact
+    commit the worker produced: run records, not agent labels."""
+    errors = []
+    reviewer, worker = task["reviewer"], task["assigned_agent"]
+    if reviewer == "human":
+        if not any(ev["kind"] == "review_note" and ev["produced_by"] == "human" for ev in task["evidence"]):
+            errors.append("reviewer is 'human' but no review_note produced_by 'human' is recorded")
+        return errors
+
+    from jsonschema import Draft202012Validator
+    run_validator = Draft202012Validator(json.loads(RUN_SCHEMA_PATH.read_text(encoding="utf-8")))
+    records = []
+    for eid, rec in load_run_records(task):
+        problems = [e.message for e in run_validator.iter_errors(rec)]
+        if problems:
+            errors.append(f"run record '{eid}' is malformed: {problems[0]}")
+        elif rec["task_id"] != task["task_id"]:
+            errors.append(f"run record '{eid}' belongs to task {rec['task_id']}")
+        else:
+            records.append(rec)
+
+    def runs(role, agent):
+        return [r for r in records if r["role"] == role and r["agent"] == agent and r["status"] == "completed"]
+
+    workers = runs("worker", worker)
+    if not workers:
+        errors.append(f"no completed worker run record by '{worker}'")
+        return errors
+    final = workers[-1]
+    head = final["result_commit"]
+    if worker in CLI_OF_AGENT and final["cli"]["name"] != CLI_OF_AGENT[worker]:
+        errors.append(f"worker run {final['run_id']} ran '{final['cli']['name']}', not {CLI_OF_AGENT[worker]}")
+    reviews = [r for r in runs("reviewer", reviewer) if r["target_commit"] == head]
+    if not reviews:
+        errors.append(f"no completed reviewer run by '{reviewer}' on the worker's result commit {head}")
+    for rec in reviews:
+        if reviewer in CLI_OF_AGENT and rec["cli"]["name"] != CLI_OF_AGENT[reviewer]:
+            errors.append(f"reviewer run {rec['run_id']} ran '{rec['cli']['name']}', not {CLI_OF_AGENT[reviewer]}")
+        paths = (final["cli"]["path"], rec["cli"]["path"])
+        if None in paths or os.path.realpath(paths[0]) == os.path.realpath(paths[1]):
+            errors.append(f"reviewer run {rec['run_id']} and worker run do not name two different executables")
+        if rec["security"]["workspace_modified_by_reviewer"] is not False:
+            errors.append(f"reviewer run {rec['run_id']} did not prove it left the reviewed tree unchanged")
+        ids = (final["session_id_reported"], rec["session_id_reported"])
+        if None in ids:
+            errors.append("session ids not reported for worker/reviewer runs; independence is unproven")
+        elif ids[0] == ids[1]:
+            errors.append(f"worker and reviewer runs report the same session id {ids[0]}")
+    has_command = any(c["verification"]["method"] == "command" for c in task["acceptance_criteria"])
+    if has_command and not any(r["role"] == "check" and r["status"] == "completed" and r["target_commit"] == head
+                               for r in records):
+        errors.append(f"no completed check run on the worker's result commit {head}")
     return errors
 
 

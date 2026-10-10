@@ -1,0 +1,110 @@
+{
+  "schema_version": "0.2",
+  "task_id": "DEV-0002",
+  "task_type": "development",
+  "objective": "greet() に言語指定を追加し、lang=\"ja\" のとき日本語で挨拶できるようにする。既存の英語の挙動は変えない。（DEV-0001 と同一課題を担当を入れ替えて実施する比較実験。DEV-0001 の成果物を見ずに、DEV-0001 と同じ基点コミットから開始する）",
+  "inputs": [
+    {
+      "id": "src",
+      "kind": "file",
+      "location": "examples/development/src/greet.py",
+      "description": "変更対象のプログラム",
+      "sensitivity": "public"
+    },
+    {
+      "id": "existing-tests",
+      "kind": "file",
+      "location": "examples/development/src/test_greet.py",
+      "description": "既存テスト。変更後も通ること",
+      "sensitivity": "public"
+    }
+  ],
+  "constraints": [
+    "変更は examples/development/src/ 配下に限る",
+    "外部ライブラリを追加しない",
+    "既存テストを削除・無効化しない"
+  ],
+  "allowed_paths": [
+    "examples/development/src"
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "AC1",
+      "description": "greet(\"Ada\", lang=\"ja\") が \"こんにちは、Adaさん\" を返す",
+      "dimension": "spec_conformance",
+      "verification": {
+        "method": "command",
+        "command": "cd examples/development/src && python3 -c 'from greet import greet; assert greet(\"Ada\", lang=\"ja\") == \"こんにちは、Adaさん\"'",
+        "expected": "exit 0"
+      }
+    },
+    {
+      "id": "AC2",
+      "description": "既存テストと追加テストがすべて通る（英語の挙動が不変）",
+      "dimension": "correctness",
+      "verification": {
+        "method": "command",
+        "command": "cd examples/development/src && python3 -m unittest -v",
+        "expected": "exit 0, failures=0"
+      }
+    },
+    {
+      "id": "AC3",
+      "description": "lang=\"ja\" のテストが追加され、未対応の lang の扱いが文書化されている",
+      "dimension": "completeness",
+      "verification": {
+        "method": "inspection"
+      }
+    }
+  ],
+  "failure_conditions": [
+    {
+      "id": "FC1",
+      "description": "既存テストが失敗する",
+      "on_trigger": "rework"
+    },
+    {
+      "id": "FC2",
+      "description": "制約外のファイルが変更される",
+      "on_trigger": "escalate"
+    },
+    {
+      "id": "FC3",
+      "description": "テストを削除・skip して合格させようとした",
+      "on_trigger": "escalate"
+    }
+  ],
+  "assigned_agent": "codex-cli",
+  "reviewer": "claude-code",
+  "status": "ready",
+  "evidence": [],
+  "quality": {
+    "spec_conformance": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    },
+    "correctness": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    },
+    "completeness": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    }
+  },
+  "retry_count": 0,
+  "max_retries": 2,
+  "escalation_reason": null,
+  "history": [
+    {
+      "from": "draft",
+      "to": "ready",
+      "at": "2026-10-10T01:18:44Z",
+      "by": "claude-code",
+      "note": "Claude Code が担当入替の比較実験として起票。受入基準は DEV-0001 と同一。人間による確認は未実施"
+    }
+  ]
+}

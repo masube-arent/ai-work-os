@@ -1,42 +1,39 @@
 # ルーティング（担当の決め方）
 
-Phase 1 では **手動指定** を基本とする。タスク契約の `assigned_agent` と `reviewer` に人間が書く。
-自動選択は Phase 5 で、実績データ（どのエージェントがどの task_type で何回 PASS/FAIL したか）が
-溜まってから設計する。
+担当はタスク契約の `assigned_agent`（実装）と `reviewer`（独立レビュー）で決まる。
+ランナー（`scripts/aiwos.py`）にはこれを上書きするオプションがない。担当を変えるときは契約を変える
+（比較実験なら別の契約を起票する）。自動選択は Phase 5 で、実績データ（`aiwos.py metrics`）が溜まってから設計する。
 
-## 指定できる担当
-
-| 値 | 実体 | 主な用途 |
-|---|---|---|
-| `chatgpt` | ChatGPT（通常チャット） | 目的整理、要件・受入基準の作成、重大な仕様変更の評価 |
-| `claude-code` | Claude Code CLI | 技術調査、実装、修正、テスト |
-| `codex-cli` | Codex CLI | 代替実装、独立レビュー、原因分析 |
-| `human` | 人間 | 最終承認、権限・外部送信・仕様変更の判断 |
-
-## 既定の組み合わせ
+## 初期ルーティング（Phase 2）
 
 | 局面 | assigned_agent | reviewer |
 |---|---|---|
-| 要件・受入基準の作成（draft → ready） | `chatgpt` | `human` |
-| 実装 | `claude-code` | `codex-cli` |
-| 代替実装（同じ課題を別実装で比較） | `codex-cli` | `claude-code` |
-| 不具合の原因分析 | `codex-cli` | `claude-code` |
-| 最終承認（passed → accepted） | — | `human`（遷移の実行者） |
+| 実装（既定） | `claude-code` | `codex-cli` |
+| 担当入替の比較（例: DEV-0002） | `codex-cli` | `claude-code` |
+| 要件・受入基準の作成（draft → ready） | `chatgpt` または人間 | `human` |
+| 最終承認（passed → accepted） | — | `human` |
 
-組み合わせは固定ではない。条件は1つだけ: **`reviewer` は `assigned_agent` と異なる**（検証済み）。
+## 指定できる担当
 
-## 接続についての前提
+| 値 | 実体 | ランナーで実行 |
+|---|---|---|
+| `claude-code` | Claude Code CLI | 可（`agents/claude.md`） |
+| `codex-cli` | Codex CLI | 可（ログイン後。`agents/codex.md`） |
+| `chatgpt` | ChatGPT（通常チャット） | 不可。自動接続なし。人間が brief を渡し、結果を記録する |
+| `human` | 人間 | 不可。`review_note`（produced_by: human）で記録する |
+| `aiwos-runner` | ランナー自身 | 担当にはなれない。機械的な手順（check、状態遷移）の実行者としてのみ記録される |
 
-- ChatGPT の通常チャットと、Claude Code / Codex CLI は **自動接続されていない**。
-  ChatGPT とのやり取りは、人間がタスク契約 JSON や `render-brief.py` の出力をコピーして渡す。
-- Claude Code と Codex CLI の自動連携は Phase 2。Phase 1 では人間が各 CLI を起動し、
-  `python3 scripts/render-brief.py TASK.json` の出力を渡す。
+## 独立性
+
+`reviewer` ≠ `assigned_agent` は必要条件にすぎない。`passed` には実行記録による証明が必要
+（`core/execution.md` の「独立性の証明」）。
 
 ## 新しい AI を追加するとき
 
 1. `contracts/task.schema.json` の `$defs.agent` に名前を追加する
-2. `agents/<name>.md` に起動方法・権限設定・制約を書く（未確認の機能は「未確認」と書く）
-3. `scripts/doctor.sh` に存在確認を追加する
-4. テストを追加して `bash scripts/check.sh` を通す
+2. `scripts/adapters.py` に Adapter を1つ追加する（`--help` と実行で確認したオプションだけを使う）
+3. `scripts/validate-task.py` の `CLI_OF_AGENT` に実行ファイル名を追加する
+4. `agents/<name>.md` に確認結果と未確認事項を書く
+5. スタブ CLI のテストを追加して `bash scripts/check.sh` を通す
 
-業務ルール（`core/`）・PROFILE・既存のタスク契約は変更しない。
+業務ルール（`core/`）・PROFILE・既存のタスク契約・ランナー本体は変更しない。

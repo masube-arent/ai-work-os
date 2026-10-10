@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/masube-arent/ai-work-os/contracts/task.schema.json",
   "title": "AI WORK OS task contract",
-  "description": "Structural rules for a task. Cross-field rules (reviewer independence, evidence references, state transitions, retry limit) live in scripts/validate-task.py and are documented in core/contract.md.",
+  "description": "Structural rules for a task. Cross-field rules (reviewer independence, evidence references and hashes, state transitions, retry limit) live in scripts/validate-task.py and are documented in core/contract.md. Version 0.2 only adds optional fields; every 0.1 contract is still valid.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -25,7 +25,12 @@
     "history"
   ],
   "properties": {
-    "schema_version": { "const": "0.1" },
+    "schema_version": {
+      "enum": [
+        "0.1",
+        "0.2"
+      ]
+    },
     "task_id": {
       "type": "string",
       "pattern": "^[A-Z][A-Z0-9]*-[0-9]{4,}$",
@@ -36,66 +41,136 @@
       "pattern": "^[a-z][a-z0-9-]*$",
       "description": "Name of a profile under profiles/<task_type>.md."
     },
-    "objective": { "type": "string", "minLength": 10 },
+    "objective": {
+      "type": "string",
+      "minLength": 10
+    },
     "inputs": {
       "type": "array",
-      "items": { "$ref": "#/$defs/input" }
+      "items": {
+        "$ref": "#/$defs/input"
+      }
     },
     "constraints": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 }
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "allowed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[^/.][^\\0]*$",
+        "minLength": 1
+      },
+      "description": "0.2. Repo-relative path prefixes a worker run may change. A run that changes anything else stops as a scope violation."
     },
     "acceptance_criteria": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/criterion" }
+      "items": {
+        "$ref": "#/$defs/criterion"
+      }
     },
     "failure_conditions": {
       "type": "array",
       "minItems": 1,
-      "items": { "$ref": "#/$defs/failure_condition" }
+      "items": {
+        "$ref": "#/$defs/failure_condition"
+      }
     },
-    "assigned_agent": { "$ref": "#/$defs/agent" },
-    "reviewer": { "$ref": "#/$defs/agent" },
-    "status": { "$ref": "#/$defs/status" },
+    "assigned_agent": {
+      "$ref": "#/$defs/agent"
+    },
+    "reviewer": {
+      "$ref": "#/$defs/agent"
+    },
+    "status": {
+      "$ref": "#/$defs/status"
+    },
     "evidence": {
       "type": "array",
-      "items": { "$ref": "#/$defs/evidence" }
+      "items": {
+        "$ref": "#/$defs/evidence"
+      }
     },
     "quality": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["spec_conformance", "correctness", "completeness"],
+      "required": [
+        "spec_conformance",
+        "correctness",
+        "completeness"
+      ],
       "properties": {
-        "spec_conformance": { "$ref": "#/$defs/judgment" },
-        "correctness": { "$ref": "#/$defs/judgment" },
-        "completeness": { "$ref": "#/$defs/judgment" }
+        "spec_conformance": {
+          "$ref": "#/$defs/judgment"
+        },
+        "correctness": {
+          "$ref": "#/$defs/judgment"
+        },
+        "completeness": {
+          "$ref": "#/$defs/judgment"
+        }
       }
     },
-    "retry_count": { "type": "integer", "minimum": 0 },
+    "retry_count": {
+      "type": "integer",
+      "minimum": 0
+    },
     "max_retries": {
       "type": "integer",
       "minimum": 0,
       "maximum": 3,
       "description": "Hard cap on automatic rework cycles. Raising the cap above 3 is a policy change, not a task setting."
     },
-    "escalation_reason": { "type": ["string", "null"] },
+    "escalation_reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
     "history": {
       "type": "array",
-      "items": { "$ref": "#/$defs/transition" }
+      "items": {
+        "$ref": "#/$defs/transition"
+      }
     }
   },
   "allOf": [
     {
-      "if": { "properties": { "status": { "const": "escalated" } } },
+      "if": {
+        "properties": {
+          "status": {
+            "const": "escalated"
+          }
+        }
+      },
       "then": {
-        "properties": { "escalation_reason": { "type": "string", "minLength": 1 } }
+        "properties": {
+          "escalation_reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
       }
     }
   ],
   "$defs": {
-    "id": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
-    "agent": { "enum": ["chatgpt", "claude-code", "codex-cli", "human"] },
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+    },
+    "agent": {
+      "enum": [
+        "chatgpt",
+        "claude-code",
+        "codex-cli",
+        "human"
+      ]
+    },
     "status": {
       "enum": [
         "draft",
@@ -113,107 +188,324 @@
     "input": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "location", "sensitivity"],
+      "required": [
+        "id",
+        "kind",
+        "location",
+        "sensitivity"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
         "kind": {
-          "enum": ["file", "text", "url", "reference"],
+          "enum": [
+            "file",
+            "text",
+            "url",
+            "reference"
+          ],
           "description": "file: repo-relative path. text: inline value. url: public URL. reference: pointer to data held outside the repository."
         },
-        "location": { "type": "string", "minLength": 1 },
-        "description": { "type": "string" },
-        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "sensitivity": { "enum": ["public", "internal", "confidential"] }
+        "location": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "sensitivity": {
+          "enum": [
+            "public",
+            "internal",
+            "confidential"
+          ]
+        }
       }
     },
     "criterion": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description", "dimension", "verification"],
+      "required": [
+        "id",
+        "description",
+        "dimension",
+        "verification"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "description": { "type": "string", "minLength": 1 },
-        "dimension": { "enum": ["spec_conformance", "correctness", "completeness"] },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dimension": {
+          "enum": [
+            "spec_conformance",
+            "correctness",
+            "completeness"
+          ]
+        },
         "verification": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["method"],
+          "required": [
+            "method"
+          ],
           "properties": {
-            "method": { "enum": ["command", "inspection", "human"] },
-            "command": { "type": "string", "minLength": 1 },
-            "expected": { "type": "string" }
+            "method": {
+              "enum": [
+                "command",
+                "inspection",
+                "human"
+              ]
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1
+            },
+            "expected": {
+              "type": "string"
+            },
+            "expected_exit_code": {
+              "type": "integer",
+              "description": "0.2. Exit code that counts as success for a command criterion. Defaults to 0."
+            }
           },
-          "if": { "properties": { "method": { "const": "command" } } },
-          "then": { "required": ["command"] }
+          "if": {
+            "properties": {
+              "method": {
+                "const": "command"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "command"
+            ]
+          }
         }
       }
     },
     "failure_condition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "description", "on_trigger"],
+      "required": [
+        "id",
+        "description",
+        "on_trigger"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "description": { "type": "string", "minLength": 1 },
-        "on_trigger": { "enum": ["rework", "escalate", "cancel"] }
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        },
+        "on_trigger": {
+          "enum": [
+            "rework",
+            "escalate",
+            "cancel"
+          ]
+        }
       }
     },
     "evidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "produced_by", "created_at", "criterion_ids"],
+      "required": [
+        "id",
+        "kind",
+        "produced_by",
+        "created_at",
+        "criterion_ids"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "kind": { "enum": ["command_output", "file", "diff", "review_note", "log"] },
-        "path": { "type": "string" },
-        "command": { "type": "string" },
-        "exit_code": { "type": "integer" },
-        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-        "summary": { "type": "string" },
-        "produced_by": { "$ref": "#/$defs/agent" },
-        "created_at": { "type": "string", "format": "date-time" },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "kind": {
+          "enum": [
+            "command_output",
+            "file",
+            "diff",
+            "review_note",
+            "log",
+            "run_record"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "command": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "produced_by": {
+          "$ref": "#/$defs/actor"
+        },
+        "created_at": {
+          "type": "string",
+          "format": "date-time"
+        },
         "criterion_ids": {
           "type": "array",
-          "items": { "$ref": "#/$defs/id" }
+          "items": {
+            "$ref": "#/$defs/id"
+          }
         }
       },
-      "if": { "properties": { "kind": { "const": "command_output" } } },
-      "then": { "required": ["command", "exit_code"] }
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "command_output"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "command",
+          "exit_code"
+        ]
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "sha256"
+            ]
+          },
+          "then": {
+            "required": [
+              "path"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "run_record"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "path",
+              "sha256"
+            ]
+          }
+        }
+      ]
     },
     "judgment": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["verdict", "evidence_ids", "judged_by"],
+      "required": [
+        "verdict",
+        "evidence_ids",
+        "judged_by"
+      ],
       "properties": {
-        "verdict": { "enum": ["PASS", "FAIL", "UNVERIFIED"] },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "UNVERIFIED"
+          ]
+        },
         "evidence_ids": {
           "type": "array",
-          "items": { "$ref": "#/$defs/id" }
+          "items": {
+            "$ref": "#/$defs/id"
+          }
         },
         "judged_by": {
-          "oneOf": [{ "$ref": "#/$defs/agent" }, { "type": "null" }]
+          "oneOf": [
+            {
+              "$ref": "#/$defs/actor"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "note": { "type": "string" }
+        "note": {
+          "type": "string"
+        }
       },
-      "if": { "properties": { "verdict": { "const": "PASS" } } },
+      "if": {
+        "properties": {
+          "verdict": {
+            "const": "PASS"
+          }
+        }
+      },
       "then": {
         "properties": {
-          "evidence_ids": { "minItems": 1 },
-          "judged_by": { "$ref": "#/$defs/agent" }
+          "evidence_ids": {
+            "minItems": 1
+          },
+          "judged_by": {
+            "$ref": "#/$defs/actor"
+          }
         }
       }
     },
     "transition": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["from", "to", "at", "by"],
+      "required": [
+        "from",
+        "to",
+        "at",
+        "by"
+      ],
       "properties": {
-        "from": { "$ref": "#/$defs/status" },
-        "to": { "$ref": "#/$defs/status" },
-        "at": { "type": "string", "format": "date-time" },
-        "by": { "$ref": "#/$defs/agent" },
-        "note": { "type": "string" }
+        "from": {
+          "$ref": "#/$defs/status"
+        },
+        "to": {
+          "$ref": "#/$defs/status"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "by": {
+          "$ref": "#/$defs/actor"
+        },
+        "note": {
+          "type": "string"
+        }
       }
+    },
+    "actor": {
+      "description": "Who did something: an agent, or the AI WORK OS runner itself (mechanical steps only; never an assignee).",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/agent"
+        },
+        {
+          "const": "aiwos-runner"
+        }
+      ]
     }
   }
 }

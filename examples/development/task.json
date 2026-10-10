@@ -1,5 +1,5 @@
 {
-  "schema_version": "0.1",
+  "schema_version": "0.2",
   "task_id": "DEV-0001",
   "task_type": "development",
   "objective": "greet() に言語指定を追加し、lang=\"ja\" のとき日本語で挨拶できるようにする。既存の英語の挙動は変えない。",
@@ -23,6 +23,9 @@
     "変更は examples/development/src/ 配下に限る",
     "外部ライブラリを追加しない",
     "既存テストを削除・無効化しない"
+  ],
+  "allowed_paths": [
+    "examples/development/src"
   ],
   "acceptance_criteria": [
     {
@@ -49,27 +52,59 @@
       "id": "AC3",
       "description": "lang=\"ja\" のテストが追加され、未対応の lang の扱いが文書化されている",
       "dimension": "completeness",
-      "verification": { "method": "inspection" }
+      "verification": {
+        "method": "inspection"
+      }
     }
   ],
   "failure_conditions": [
-    { "id": "FC1", "description": "既存テストが失敗する", "on_trigger": "rework" },
-    { "id": "FC2", "description": "制約外のファイルが変更される", "on_trigger": "escalate" },
-    { "id": "FC3", "description": "テストを削除・skip して合格させようとした", "on_trigger": "escalate" }
+    {
+      "id": "FC1",
+      "description": "既存テストが失敗する",
+      "on_trigger": "rework"
+    },
+    {
+      "id": "FC2",
+      "description": "制約外のファイルが変更される",
+      "on_trigger": "escalate"
+    },
+    {
+      "id": "FC3",
+      "description": "テストを削除・skip して合格させようとした",
+      "on_trigger": "escalate"
+    }
   ],
   "assigned_agent": "claude-code",
   "reviewer": "codex-cli",
   "status": "ready",
   "evidence": [],
   "quality": {
-    "spec_conformance": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null },
-    "correctness": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null },
-    "completeness": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null }
+    "spec_conformance": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    },
+    "correctness": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    },
+    "completeness": {
+      "verdict": "UNVERIFIED",
+      "evidence_ids": [],
+      "judged_by": null
+    }
   },
   "retry_count": 0,
   "max_retries": 2,
   "escalation_reason": null,
   "history": [
-    { "from": "draft", "to": "ready", "at": "2026-10-10T00:00:00Z", "by": "human", "note": "受入基準を確認し着手可とした" }
+    {
+      "from": "draft",
+      "to": "ready",
+      "at": "2026-10-10T00:00:00Z",
+      "by": "claude-code",
+      "note": "Claude Code が起票し ready にした。Phase 1 では by: human と記録したが、人間による受入基準の確認は行われていない（Phase 2 で訂正）。時刻 00:00:00Z は Phase 1 作成時の概算（日付のみ正確）"
+    }
   ]
 }

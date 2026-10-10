@@ -16,6 +16,12 @@ Claude Code はこのリポジトリで **実装・修正・テスト・レビ�
 `.claude/settings.json` が破壊的操作と外部送信を制限している。制限を緩める変更は
 人間の承認なしに行わない（`core/permissions.md`）。
 
+## エージェントの実行（Phase 2）
+
+- エージェントの起動は `scripts/aiwos.py` を通す（`core/execution.md`）。ドライランで内容を確認してから `--execute` を付ける。
+- `--execute` はモデルを動かす。ユーザーの指示がある場合だけ実行する。
+- `runs/` の記録と、契約の `evidence` / `history` を手で書き換えない。
+
 ## 人間に確認すること
 
 - 受入基準・失敗条件・`max_retries` の変更

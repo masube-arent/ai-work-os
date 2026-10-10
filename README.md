@@ -4,7 +4,8 @@ GitHub を共通の情報基盤として、ChatGPT・Claude Code・Codex CLI・�
 **モデル非依存の業務基盤**。業務ルール・品質基準・実行記録をリポジトリに置き、
 実行主体（AI）を交換しても同じ契約・同じ品質ゲートで仕事を回せるようにする。
 
-> 現在のバージョン: **v0.1（Phase 1: 土台）**。AI の自動起動・自動連携はまだ実装していない。
+> 現在のバージョン: **v0.2（Phase 2: マルチAI実行基盤）**。Claude Code の実行は確認済み、
+> Codex CLI は導入済みだが未ログインのため実行していない。
 > 何が実装済みで何が未実装かは [docs/architecture.md](docs/architecture.md) と [docs/roadmap.md](docs/roadmap.md) を参照。
 
 ## 考え方
@@ -20,13 +21,16 @@ GitHub を共通の情報基盤として、ChatGPT・Claude Code・Codex CLI・�
 
 ```
 README.md, AGENTS.md, CLAUDE.md   入口・AI向け作業規則
-core/          共通OS: policy / quality / contract / permissions / state-machine
+core/          共通OS: policy / quality / contract / permissions / state-machine / execution
 profiles/      業務別ルール: development, document-compare, drawing-analysis(雛形), data-analysis(雛形)
-contracts/     task.schema.json（タスク契約の構造）, task.example.json（起票テンプレート）
+contracts/     task.schema.json（タスク契約 0.2）, run.schema.json（実行記録）, review.schema.json（レビュー出力）,
+               task.example.json（起票テンプレート）
 agents/        routing（担当の決め方）, claude, codex
-scripts/       doctor.sh, validate-task.py, render-brief.py, scan_secrets.py, check.sh
-examples/      development/（DEV-0001）, document-compare/（DOC-0001）
-tests/         unittest（55件）, fixtures/invalid-task.json, results/（実行記録）
+scripts/       aiwos.py（ランナー）, adapters.py（CLI ごとの差異）, doctor.sh, validate-task.py,
+               render-brief.py, scan_secrets.py, check.sh
+examples/      development/（DEV-0001, 担当入替の DEV-0002）, document-compare/（DOC-0001）
+runs/          実行記録（run.json・プロンプト・出力・差分・検証ログ。SHA-256 で照合）
+tests/         unittest（90件、エージェントはスタブ）, fixtures/, results/（テスト・実証実験の記録）
 docs/          architecture, roadmap
 .claude/settings.json   Claude Code の権限制限（deny / ask）
 .githooks/pre-commit    コミット前の秘密情報スキャン
@@ -83,7 +87,24 @@ AI の起動や外部送信は一切しない。
 再度 `validate-task.py` で検証する。証拠のない `PASS`、実装者自身の `PASS`、
 遷移表にない状態変更は拒否される。
 
-### 5. コミット前の品質ゲート
+### 5. エージェントを動かす（Phase 2）
+
+```bash
+python3 scripts/aiwos.py auth                                      # 使える CLI・認証状態
+python3 scripts/aiwos.py run   examples/development/task.json --role worker              # ドライラン
+python3 scripts/aiwos.py run   examples/development/task.json --role worker --execute    # 実装（Claude Code）
+python3 scripts/aiwos.py check examples/development/task.json --execute                  # 受入コマンドを実行
+python3 scripts/aiwos.py run   examples/development/task.json --role reviewer --execute  # 独立レビュー（Codex CLI）
+python3 scripts/aiwos.py judge examples/development/task.json --write                    # 3軸判定・状態遷移
+python3 scripts/aiwos.py status examples/development/task.json
+python3 scripts/aiwos.py metrics                                   # AI 別の性能記録
+```
+
+`--execute` / `--write` がなければ何も実行・変更しない。実行は隔離ワークスペースで行われ、
+結果は `run/<task>/<run>` ブランチと `runs/` に記録される。停止条件・独立性の証明・測定項目は
+[core/execution.md](core/execution.md)。
+
+### 6. コミット前の品質ゲート
 
 ```bash
 bash scripts/check.sh

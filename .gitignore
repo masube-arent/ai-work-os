@@ -6,4 +6,7 @@ secrets/
 __pycache__/
 *.pyc
 .venv/
-runs/
+runs/*/.active
+*.json.lock
+*.json.tmp
+.test-evidence/

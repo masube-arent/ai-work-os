@@ -20,10 +20,20 @@ Claude Code はこのリポジトリ内で起動したときに読み込む。
 
 ### Codex CLI
 
-Codex CLI はこの初期構築環境にインストールされておらず、オプションを実機で確認していない。
-サンドボックス・承認モードの指定方法は `codex --help` と公式ドキュメントで確認してから使う
-（`scripts/doctor.sh` が `--help` に記載された実行方式を表示する）。
-確認するまでは Codex CLI を **読み取り専用のレビュー用途** に限定する運用とする。
+`codex exec --help`（0.162.1）で確認した `-s read-only` / `-s workspace-write` をランナーが指定する
+（reviewer は read-only、worker は workspace-write）。`danger-full-access` と
+`--dangerously-bypass-approvals-and-sandbox` は使わない。サンドボックスの実際の制限範囲は
+ログイン後の実行で確認するまで未検証（`agents/codex.md`）。
+
+### ランナー（Phase 2）
+
+`scripts/aiwos.py` が実行時に強制する制限（`core/execution.md` の停止条件）:
+
+- 子プロセスへ渡す環境変数は許可リストのみ。`GH_TOKEN`・`ANTHROPIC_API_KEY`・`OPENAI_API_KEY` 等は渡さない
+- 認証方式がサブスクリプションのログインでなければ実行しない（API キー課金の防止）
+- 実行ごとの壁時計タイムアウト、1 コマンド 1 実行（ループなし）、`--execute` なしはドライラン
+- 出力・差分・ログの秘密情報検査、`allowed_paths` 外の変更検査、レビュアーによる変更の検査。違反時は停止しエスカレーション
+- ランナーは push・デプロイをしない。結果はローカルのブランチ `run/<task>/<run>` と `runs/` の記録に残すだけ
 
 ### Git フック
 
@@ -42,4 +52,5 @@ git config core.hooksPath .githooks   # コミット前に scan_secrets.py を�
 ## 限界
 
 設定ファイルによる制限は、そのツールが設定を読み込む場合にのみ有効である。
-OS レベルの隔離（コンテナ、専用ユーザー、ネットワーク制限）は Phase 2 で設計する。
+OS レベルの隔離（コンテナ、専用ユーザー、ネットワーク制限）は未実装（Phase 2 では論理分離まで。
+`core/execution.md` の「作業環境の分離」）。

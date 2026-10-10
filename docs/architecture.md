@@ -33,21 +33,26 @@
 | 判定値に `UNVERIFIED` を置き既定値にする | 検証していないものが黙って合格扱いになるのを防ぐ |
 | 状態遷移の記録を契約内に持つ | どのエージェント・セッションでも、ファイルを読めば再開できる |
 | AI は列挙型で名前を持つ | 新しいモデルの追加はスキーマの列挙に1語足すだけで、業務ルールは変わらない |
-| 実行は手動 + brief 出力のみ | 未確認の CLI オプションに依存しない。自動化は Phase 2 で段階的に |
+| 実行は1コマンド1実行、ドライラン既定 | 無制限の自動実行をしない。確認済みの CLI オプションだけを使う |
+| CLI の差異は adapters.py に閉じ込める | モデル・CLI を替えても契約・ランナー・品質規則は変わらない |
+| 実行記録（run.json）を証拠の一次情報とする | 担当の識別子ではなく、実際に動いた実行ファイル・セッション・コミットで独立性を判断する |
 | GitHub Actions を持たない | コストと権限の面を最小にする。ゲートはローカルの `check.sh` |
 | 依存は jsonschema のみ | セットアップを最小にする |
 
-## 共通OSの機能と実装状況
+## 共通OSの機能と実装状況（Phase 2 時点）
 
-| 機能 | 実装場所 | Phase 1 の状態 |
+| 機能 | 実装場所 | 状態 |
 |---|---|---|
 | 目的管理 | `objective` | 実装済み（記述のみ） |
-| タスク契約 | `contracts/task.schema.json` | 実装済み・機械検証あり |
-| 入力データ管理 | `inputs`（kind / sensitivity） | 実装済み（ファイル存在・機密区分を検証。`sha256` の照合は未実装） |
-| 成功・失敗条件 | `acceptance_criteria` / `failure_conditions` | 実装済み |
-| 権限付与 | `assigned_agent` / `reviewer`、`.claude/settings.json` | 一部（Claude Code のみ設定。Codex は未確認） |
-| 実行状態管理 | `status` / `history` | 実装済み（手動更新 + 遷移検証） |
-| 証拠管理 | `evidence` | 実装済み（記録形式と参照整合。中身の真正性は未検証） |
-| 品質判定 | `quality`（3軸） | 実装済み |
-| エスカレーション | `escalated` / `escalation_reason` | 実装済み（通知は未実装） |
-| 中断・再開 | `suspended` と再開規則 | 実装済み（手動。自動再開は Phase 3） |
+| タスク契約 | `contracts/task.schema.json`（0.2） | 実装済み・機械検証あり |
+| 入力データ管理 | `inputs`（kind / sensitivity） | 実装済み（入力ファイルの `sha256` 照合は未実装） |
+| 成功・失敗条件 | `acceptance_criteria` / `failure_conditions` | 実装済み。失敗条件の自動判定は停止条件（秘密情報・範囲外変更）に対応するものだけ |
+| 権限付与 | 契約の担当 + `adapters.py` の起動オプション + `.claude/settings.json` | 実装済み（Codex のサンドボックス実効範囲は未検証） |
+| 実行状態管理 | `status` / `history`、`aiwos.py` による遷移 | 実装済み（同時更新の検出あり） |
+| 実行 | `aiwos.py run / check` | Claude Code: 実行確認済み。Codex CLI: 未ログインのため未実行 |
+| 証拠管理 | `runs/` + `evidence`（SHA-256） | 実装済み（ハッシュ照合あり） |
+| 品質判定 | `aiwos.py judge`（3軸） | 実装済み |
+| 独立性の証明 | 実行記録による検証（validate-task.py） | 実装済み |
+| エスカレーション | 停止条件 → `escalated` | 実装済み（通知は未実装） |
+| 中断・再開 | `suspended` と再開規則、中断された実行の再起動 | 手動で実装済み。自動再開は Phase 3 |
+| 性能測定 | `aiwos.py metrics` | 実装済み（測定できない値は null） |

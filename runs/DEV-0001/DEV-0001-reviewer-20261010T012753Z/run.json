@@ -1,0 +1,60 @@
+{
+  "run_schema_version": "0.2",
+  "run_id": "DEV-0001-reviewer-20261010T012753Z",
+  "task_id": "DEV-0001",
+  "task_path": "examples/development/task.json",
+  "task_type": "development",
+  "role": "reviewer",
+  "agent": "codex-cli",
+  "status": "blocked",
+  "stop_reason": "codex is not logged in (run: codex login --device-auth)",
+  "cli": {
+    "name": "codex",
+    "path": "/tmp/claude-0/-home-user-arent-strategy/e3ce2874-08ac-541a-9374-4eb348c48dfe/scratchpad/codex/node_modules/.bin/codex",
+    "version": "codex-cli 0.162.1"
+  },
+  "auth": {
+    "checked": true,
+    "logged_in": false,
+    "method": null,
+    "provider": null
+  },
+  "argv": [
+    "/tmp/claude-0/-home-user-arent-strategy/e3ce2874-08ac-541a-9374-4eb348c48dfe/scratchpad/codex/node_modules/.bin/codex",
+    "exec",
+    "-s",
+    "read-only",
+    "-C",
+    "/root/.cache/aiwos/workspaces/DEV-0001-reviewer-20261010T012753Z",
+    "--json",
+    "--ephemeral",
+    "-o",
+    "/home/user/ai-work-os/runs/DEV-0001/DEV-0001-reviewer-20261010T012753Z/last-message.txt",
+    "--output-schema",
+    "/home/user/ai-work-os/contracts/review.schema.json",
+    "-"
+  ],
+  "model_requested": null,
+  "models_reported": null,
+  "session_id_reported": null,
+  "cost_usd_reported": null,
+  "num_turns_reported": null,
+  "base_commit": "8a1a9ac67328409f9203118e34b5944e780d9bbc",
+  "target_commit": "af093f4a00b448671976faf3ded052e46ce1fed7",
+  "result_commit": null,
+  "branch": null,
+  "task_sha256_at_start": "7b8cc7c8456a403cf340b2eecee0257c12ba9ff288956b7eec815edad6c2dc84",
+  "retry_count_at_start": 0,
+  "started_at": "2026-10-10T01:27:53Z",
+  "ended_at": "2026-10-10T01:27:53Z",
+  "duration_s": null,
+  "exit_code": null,
+  "timeout_s": 600,
+  "changed_files": null,
+  "files": {},
+  "security": {
+    "secret_hits": [],
+    "out_of_scope_paths": [],
+    "workspace_modified_by_reviewer": null
+  }
+}

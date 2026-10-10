@@ -1,0 +1,22 @@
+[
+  {
+    "criterion_id": "AC1",
+    "command": "cd examples/development/src && python3 -c 'from greet import greet; assert greet(\"Ada\", lang=\"ja\") == \"こんにちは、Adaさん\"'",
+    "expected_exit_code": 0,
+    "exit_code": 0,
+    "state": "exited",
+    "passed": true,
+    "duration_s": 0.0,
+    "log": "checks/AC1.log"
+  },
+  {
+    "criterion_id": "AC2",
+    "command": "cd examples/development/src && python3 -m unittest -v",
+    "expected_exit_code": 0,
+    "exit_code": 0,
+    "state": "exited",
+    "passed": true,
+    "duration_s": 0.0,
+    "log": "checks/AC2.log"
+  }
+]

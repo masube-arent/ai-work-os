@@ -1,0 +1,58 @@
+{
+  "run_schema_version": "0.2",
+  "run_id": "DEV-0002-worker-20261010T012800Z",
+  "task_id": "DEV-0002",
+  "task_path": "examples/development/task-swap.json",
+  "task_type": "development",
+  "role": "worker",
+  "agent": "codex-cli",
+  "status": "blocked",
+  "stop_reason": "codex is not logged in (run: codex login --device-auth)",
+  "cli": {
+    "name": "codex",
+    "path": "/tmp/claude-0/-home-user-arent-strategy/e3ce2874-08ac-541a-9374-4eb348c48dfe/scratchpad/codex/node_modules/.bin/codex",
+    "version": "codex-cli 0.162.1"
+  },
+  "auth": {
+    "checked": true,
+    "logged_in": false,
+    "method": null,
+    "provider": null
+  },
+  "argv": [
+    "/tmp/claude-0/-home-user-arent-strategy/e3ce2874-08ac-541a-9374-4eb348c48dfe/scratchpad/codex/node_modules/.bin/codex",
+    "exec",
+    "-s",
+    "workspace-write",
+    "-C",
+    "/root/.cache/aiwos/workspaces/DEV-0002-worker-20261010T012800Z",
+    "--json",
+    "--ephemeral",
+    "-o",
+    "/home/user/ai-work-os/runs/DEV-0002/DEV-0002-worker-20261010T012800Z/last-message.txt",
+    "-"
+  ],
+  "model_requested": null,
+  "models_reported": null,
+  "session_id_reported": null,
+  "cost_usd_reported": null,
+  "num_turns_reported": null,
+  "base_commit": "8a1a9ac67328409f9203118e34b5944e780d9bbc",
+  "target_commit": null,
+  "result_commit": null,
+  "branch": null,
+  "task_sha256_at_start": "9c8129ebefa6c9fc42bc03fdc7d9009da12b5356bf2ee5a83b832280ab178b81",
+  "retry_count_at_start": 0,
+  "started_at": "2026-10-10T01:28:00Z",
+  "ended_at": "2026-10-10T01:28:00Z",
+  "duration_s": null,
+  "exit_code": null,
+  "timeout_s": 900,
+  "changed_files": null,
+  "files": {},
+  "security": {
+    "secret_hits": [],
+    "out_of_scope_paths": [],
+    "workspace_modified_by_reviewer": null
+  }
+}

@@ -95,6 +95,10 @@ class Sandbox:
         self.tmp = Path(tempfile.mkdtemp(prefix="aiwos-test-"))
         self.repo = self.tmp / "repo"
         shutil.copytree(ROOT, self.repo, ignore=shutil.ignore_patterns(".git", "runs", "__pycache__"))
+        # start every sandbox from the frozen 'ready' contracts, whatever state
+        # the live examples are in
+        shutil.copy(ROOT / "tests/fixtures/dev-0001-ready.json", self.repo / "examples/development/task.json")
+        shutil.copy(ROOT / "tests/fixtures/dev-0002-ready.json", self.repo / "examples/development/task-swap.json")
         for args in (["init", "-q", "-b", "main"], ["add", "-A"],
                      ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]):
             subprocess.run(["git", *args], cwd=self.repo, check=True, capture_output=True)

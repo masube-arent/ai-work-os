@@ -112,22 +112,23 @@ bash scripts/check.sh
 
 全タスク契約の検証・ユニットテスト・秘密情報スキャン・環境診断を実行する。`check: PASSED` 以外ではコミットしない。
 
-## サンプルタスク
+## サンプルタスクと実証実験（Phase 2）
 
-| ID | 種別 | 内容 | 担当 → レビュー |
-|---|---|---|---|
-| DEV-0001 | development | `greet()` に日本語挨拶を追加 | claude-code → codex-cli |
-| DOC-0001 | document-compare | 仕様書 v1/v2 の差異を一覧化 | codex-cli → claude-code |
+| ID | 種別 | 内容 | 担当 → レビュー | 状態 |
+|---|---|---|---|---|
+| DEV-0001 | development | `greet()` に日本語挨拶を追加 | claude-code → codex-cli | `review`（Claude 実装・機械検証 2/2 PASS、Codex レビュー未実施） |
+| DEV-0002 | development | DEV-0001 と同一課題・担当入替 | codex-cli → claude-code | `ready`（Codex 未ログインで停止） |
+| DOC-0001 | document-compare | 仕様書 v1/v2 の差異を一覧化 | codex-cli → claude-code | `ready`（未着手） |
 
-どちらも同じタスク契約スキーマで検証される。どちらも状態は `ready`（未着手）であり、
-**AI による実際の実行と `passed` までの到達はまだ行っていない**（Phase 2 の最初の検証項目）。
+すべて同じタスク契約スキーマで検証される。記録は `runs/`、経緯と数値は
+[tests/results/2026-10-10-phase2.md](tests/results/2026-10-10-phase2.md)。
+**`passed` に到達したタスクはまだない**（独立レビューが未実施のため、完成度の軸が UNVERIFIED）。
 
 ## 次の実装ステップ
 
-1. Codex CLI を導入し、`doctor.sh` でヘルプ記載の実行方式・サンドボックス設定を確認、`agents/codex.md` を確定する
-2. DEV-0001 を Claude Code で実装し、Codex CLI でレビューして、証拠付きで `passed` まで手動で進める
-3. 非対話実行のラッパーを **ドライラン既定** で実装する（Phase 2）
-4. 実行ログを `runs/` に保存し、`evidence.sha256` で照合する
-5. 状態更新の CLI 化と自動再開（Phase 3）
+1. Codex CLI にログインし（`codex login --device-auth`）、`login status` と `--json` 出力の形式を確認して `adapters.py` の判定を確定する
+2. DEV-0001 を Codex でレビューし（`aiwos.py run ... --role reviewer --execute` → `judge --write`）、`passed` まで進める
+3. DEV-0002（Codex 実装・Claude レビュー）を DEV-0001 と同じ基点コミットから実行し、`aiwos.py metrics` で比較する
+4. OS レベルの隔離（別ユーザー・コンテナ）と、`by: human` の検証（Phase 3）
 
 詳細は [docs/roadmap.md](docs/roadmap.md)。

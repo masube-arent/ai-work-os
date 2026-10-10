@@ -1,0 +1,75 @@
+{
+  "run_schema_version": "0.2",
+  "run_id": "DEV-0001-worker-20261010T012713Z",
+  "task_id": "DEV-0001",
+  "task_path": "examples/development/task.json",
+  "task_type": "development",
+  "role": "worker",
+  "agent": "claude-code",
+  "status": "completed",
+  "stop_reason": null,
+  "cli": {
+    "name": "claude",
+    "path": "/opt/node22/bin/claude",
+    "version": "2.1.296 (Claude Code)"
+  },
+  "auth": {
+    "checked": true,
+    "logged_in": true,
+    "method": "oauth_token",
+    "provider": "firstParty"
+  },
+  "argv": [
+    "/opt/node22/bin/claude",
+    "-p",
+    "--output-format",
+    "json",
+    "--no-session-persistence",
+    "--strict-mcp-config",
+    "--disallowedTools",
+    "Bash(git push:*),Bash(git remote:*),Bash(curl:*),Bash(wget:*),WebFetch,WebSearch",
+    "--permission-mode",
+    "acceptEdits",
+    "--tools",
+    "Read,Edit,Write,Glob,Grep,Bash",
+    "--allowedTools",
+    "Bash(python3 -m unittest:*)"
+  ],
+  "model_requested": null,
+  "models_reported": [
+    {
+      "model": "claude-opus-5-5",
+      "input_tokens": 14,
+      "output_tokens": 2198
+    }
+  ],
+  "session_id_reported": "d9f14e1a-6cf7-4a4f-ae1c-2ee2628db134",
+  "cost_usd_reported": 0.146334,
+  "num_turns_reported": 9,
+  "base_commit": "8a1a9ac67328409f9203118e34b5944e780d9bbc",
+  "target_commit": null,
+  "result_commit": "af093f4a00b448671976faf3ded052e46ce1fed7",
+  "branch": "run/DEV-0001/DEV-0001-worker-20261010T012713Z",
+  "task_sha256_at_start": "29361e3ffc3c3b3d63c3868df2f8e404afab80892898ebb266009d4ac8359c5b",
+  "retry_count_at_start": 0,
+  "started_at": "2026-10-10T01:27:13Z",
+  "ended_at": "2026-10-10T01:27:36Z",
+  "duration_s": 22.8,
+  "exit_code": 0,
+  "timeout_s": 900,
+  "changed_files": [
+    "examples/development/src/greet.py",
+    "examples/development/src/test_greet.py"
+  ],
+  "files": {
+    "prompt.md": "041be7aa504c3fb84300685b734292ce81ddfbb0840cb8f91632231c453892bb",
+    "agent-stdout.json": "2f390d334051ce84c17e756baa6cd806caf800038f923a17e94b8614626eb710",
+    "agent-stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "patch.diff": "853d7e05bcdd67f00c8e83924971b9d09356675a9a7ff1afa4155eecf1d69509"
+  },
+  "security": {
+    "secret_hits": [],
+    "out_of_scope_paths": [],
+    "workspace_modified_by_reviewer": null
+  }
+}

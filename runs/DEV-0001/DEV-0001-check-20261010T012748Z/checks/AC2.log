@@ -1,0 +1,11 @@
+
+--- stderr ---
+test_greets_by_name (test_greet.GreetTest.test_greets_by_name) ... ok
+test_greets_in_english_explicitly (test_greet.GreetTest.test_greets_in_english_explicitly) ... ok
+test_greets_in_japanese (test_greet.GreetTest.test_greets_in_japanese) ... ok
+test_unsupported_lang_raises (test_greet.GreetTest.test_unsupported_lang_raises) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 0.000s
+
+OK

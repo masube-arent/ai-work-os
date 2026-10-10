@@ -76,23 +76,88 @@
   ],
   "assigned_agent": "claude-code",
   "reviewer": "codex-cli",
-  "status": "ready",
-  "evidence": [],
+  "status": "review",
+  "evidence": [
+    {
+      "id": "W20261010T012713Z",
+      "kind": "run_record",
+      "path": "runs/DEV-0001/DEV-0001-worker-20261010T012713Z/run.json",
+      "sha256": "4c13bc4b670f580b2dbe3d0bfa19c8f57ace08431ac6013c23bc4c7fc1edef73",
+      "produced_by": "aiwos-runner",
+      "created_at": "2026-10-10T01:27:36Z",
+      "criterion_ids": [],
+      "summary": "worker run by claude-code: completed"
+    },
+    {
+      "id": "W20261010T012713Z-diff",
+      "kind": "diff",
+      "path": "runs/DEV-0001/DEV-0001-worker-20261010T012713Z/patch.diff",
+      "sha256": "853d7e05bcdd67f00c8e83924971b9d09356675a9a7ff1afa4155eecf1d69509",
+      "produced_by": "claude-code",
+      "created_at": "2026-10-10T01:27:36Z",
+      "criterion_ids": []
+    },
+    {
+      "id": "C20261010T012748Z",
+      "kind": "run_record",
+      "path": "runs/DEV-0001/DEV-0001-check-20261010T012748Z/run.json",
+      "sha256": "cadd8e69692eac7c959aad73b82cb5b45a5f1d43d548ac8bd1ec60f82dd91f79",
+      "produced_by": "aiwos-runner",
+      "created_at": "2026-10-10T01:27:48Z",
+      "criterion_ids": [],
+      "summary": "check run: 2/2 passed"
+    },
+    {
+      "id": "C20261010T012748Z-AC1",
+      "kind": "command_output",
+      "path": "runs/DEV-0001/DEV-0001-check-20261010T012748Z/checks/AC1.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "produced_by": "aiwos-runner",
+      "created_at": "2026-10-10T01:27:48Z",
+      "criterion_ids": [
+        "AC1"
+      ],
+      "command": "cd examples/development/src && python3 -c 'from greet import greet; assert greet(\"Ada\", lang=\"ja\") == \"こんにちは、Adaさん\"'",
+      "exit_code": 0,
+      "summary": "exited, expected exit 0: PASS"
+    },
+    {
+      "id": "C20261010T012748Z-AC2",
+      "kind": "command_output",
+      "path": "runs/DEV-0001/DEV-0001-check-20261010T012748Z/checks/AC2.log",
+      "sha256": "621221a2be58286af3bb3f701250d115dea3f59e3bf1e7047db4b26fa6a4aa30",
+      "produced_by": "aiwos-runner",
+      "created_at": "2026-10-10T01:27:48Z",
+      "criterion_ids": [
+        "AC2"
+      ],
+      "command": "cd examples/development/src && python3 -m unittest -v",
+      "exit_code": 0,
+      "summary": "exited, expected exit 0: PASS"
+    }
+  ],
   "quality": {
     "spec_conformance": {
-      "verdict": "UNVERIFIED",
-      "evidence_ids": [],
-      "judged_by": null
+      "verdict": "PASS",
+      "evidence_ids": [
+        "C20261010T012748Z-AC1"
+      ],
+      "judged_by": "aiwos-runner",
+      "note": "AC1: PASS (check)"
     },
     "correctness": {
-      "verdict": "UNVERIFIED",
-      "evidence_ids": [],
-      "judged_by": null
+      "verdict": "PASS",
+      "evidence_ids": [
+        "C20261010T012748Z-AC2"
+      ],
+      "judged_by": "aiwos-runner",
+      "note": "AC2: PASS (check)"
     },
     "completeness": {
       "verdict": "UNVERIFIED",
       "evidence_ids": [],
-      "judged_by": null
+      "judged_by": null,
+      "note": "AC3: UNVERIFIED (none)"
     }
   },
   "retry_count": 0,
@@ -105,6 +170,20 @@
       "at": "2026-10-10T00:00:00Z",
       "by": "claude-code",
       "note": "Claude Code が起票し ready にした。Phase 1 では by: human と記録したが、人間による受入基準の確認は行われていない（Phase 2 で訂正）。時刻 00:00:00Z は Phase 1 作成時の概算（日付のみ正確）"
+    },
+    {
+      "from": "ready",
+      "to": "in_progress",
+      "at": "2026-10-10T01:27:13Z",
+      "by": "aiwos-runner",
+      "note": "worker run DEV-0001-worker-20261010T012713Z started"
+    },
+    {
+      "from": "in_progress",
+      "to": "review",
+      "at": "2026-10-10T01:27:36Z",
+      "by": "aiwos-runner",
+      "note": "worker run DEV-0001-worker-20261010T012713Z completed; result af093f4a00b4"
     }
   ]
 }

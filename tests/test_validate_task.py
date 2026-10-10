@@ -28,6 +28,11 @@ def load(rel):
     return json.loads((ROOT / rel).read_text(encoding="utf-8"))
 
 
+# Rule tests start from a frozen copy of DEV-0001 in its 'ready' state; the
+# live examples/development/task.json moves on as experiments run.
+DEV_READY = "tests/fixtures/dev-0001-ready.json"
+
+
 EVIDENCE_DIR = ROOT / ".test-evidence"  # gitignored; created and removed by this module
 WORKER_COMMIT = "a" * 40
 
@@ -83,7 +88,7 @@ def passed_task(mutate=None):
         e.update(extra)
         return e
 
-    t = load("examples/development/task.json")
+    t = load(DEV_READY)
     t["status"] = "passed"
     t["evidence"] = [
         ev("W1", "run_record", "worker.json", "aiwos-runner", []),
@@ -113,6 +118,9 @@ class ValidTasks(unittest.TestCase):
     def test_development_sample(self):
         self.assertValid(load("examples/development/task.json"))
 
+    def test_development_fixture(self):
+        self.assertValid(load(DEV_READY))
+
     def test_document_compare_sample(self):
         self.assertValid(load("examples/document-compare/task.json"))
 
@@ -136,7 +144,7 @@ class ValidTasks(unittest.TestCase):
             self.assertEqual(dev[key], swap[key], key)
 
     def test_v01_contract_still_valid(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["schema_version"] = "0.1"
         del t["allowed_paths"]
         self.assertValid(t)
@@ -145,7 +153,7 @@ class ValidTasks(unittest.TestCase):
         self.assertValid(passed_task())
 
     def test_rework_cycle_counts_retry(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["status"] = "in_progress"
         t["retry_count"] = 1
         t["history"] += [
@@ -157,7 +165,7 @@ class ValidTasks(unittest.TestCase):
         self.assertValid(t)
 
     def test_suspend_and_resume(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["status"] = "in_progress"
         t["history"] += [
             {"from": "ready", "to": "in_progress", "at": "2026-10-10T00:10:00Z", "by": "claude-code"},
@@ -184,53 +192,53 @@ class InvalidTasks(unittest.TestCase):
 
     # --- structure (schema) ---
     def test_missing_required_field(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         del t["objective"]
         self.assertRejected(t, r"'objective' is a required property")
 
     def test_unknown_field(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["priority"] = "high"
         self.assertRejected(t, r"Additional properties")
 
     def test_unknown_status(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["status"] = "done"
         self.assertRejected(t, r"schema: status")
 
     def test_unknown_agent(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["assigned_agent"] = "some-new-model"
         self.assertRejected(t, r"schema: assigned_agent")
 
     def test_no_acceptance_criteria(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["acceptance_criteria"] = []
         self.assertRejected(t, r"schema: acceptance_criteria")
 
     def test_command_criterion_without_command(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         del t["acceptance_criteria"][0]["verification"]["command"]
         self.assertRejected(t, r"'command' is a required property")
 
     def test_pass_without_evidence(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["quality"]["correctness"] = {"verdict": "PASS", "evidence_ids": [], "judged_by": "codex-cli"}
         self.assertRejected(t, r"quality/correctness/evidence_ids")
 
     def test_escalated_without_reason(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["status"] = "escalated"
         self.assertRejected(t, r"schema: escalation_reason")
 
     def test_retry_cap_above_policy(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["max_retries"] = 10
         self.assertRejected(t, r"schema: max_retries")
 
     # --- semantics ---
     def test_self_review(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["reviewer"] = t["assigned_agent"]
         self.assertRejected(t, r"reviewer must differ")
 
@@ -256,13 +264,13 @@ class InvalidTasks(unittest.TestCase):
         self.assertRejected(t, r"has no verified path \+ sha256")
 
     def test_hash_without_path(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["evidence"] = [{"id": "E1", "kind": "log", "sha256": "0" * 64, "produced_by": "human",
                           "created_at": "2026-10-10T01:00:00Z", "criterion_ids": []}]
         self.assertRejected(t, r"'path' is a required property")
 
     def test_runner_cannot_be_assigned(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["assigned_agent"] = "aiwos-runner"
         self.assertRejected(t, r"schema: assigned_agent")
 
@@ -330,47 +338,47 @@ class InvalidTasks(unittest.TestCase):
         self.assertRejected(t, r"unknown criterion 'AC9'")
 
     def test_duplicate_ids(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["failure_conditions"][0]["id"] = "AC1"
         self.assertRejected(t, r"duplicate id 'AC1'")
 
     def test_retry_over_limit(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["retry_count"] = 3
         self.assertRejected(t, r"exceeds max_retries")
 
     def test_retry_count_disagrees_with_history(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["retry_count"] = 1
         self.assertRejected(t, r"history records 0 rework")
 
     def test_missing_profile(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["task_type"] = "legal-review"
         self.assertRejected(t, r"has no profile")
 
     def test_missing_input_file(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["inputs"][0]["location"] = "examples/development/src/missing.py"
         self.assertRejected(t, r"does not exist")
 
     def test_input_outside_repo(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["inputs"][0]["location"] = "../etc/passwd"
         self.assertRejected(t, r"must be repo-relative")
 
     def test_confidential_input_stored_in_repo(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["inputs"][0]["sensitivity"] = "confidential"
         self.assertRejected(t, r"must be kind 'reference'")
 
     def test_secret_in_contract(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["constraints"].append("token: " + "ghp_" + "A" * 36)  # built at runtime, never committed
         self.assertRejected(t, r"github-token")
 
     def test_illegal_transition(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["status"] = "passed"
         t["history"].append({"from": "ready", "to": "passed", "at": "2026-10-10T00:10:00Z", "by": "codex-cli"})
         self.assertRejected(t, r"ready -> passed is not allowed")
@@ -382,17 +390,17 @@ class InvalidTasks(unittest.TestCase):
         self.assertRejected(t, r"only a human may move a task to 'accepted'")
 
     def test_status_disagrees_with_history(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["status"] = "in_progress"
         self.assertRejected(t, r"history ends in 'ready'")
 
     def test_non_draft_without_history(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["history"] = []
         self.assertRejected(t, r"only 'draft' may have no history")
 
     def test_resume_to_different_state(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["status"] = "review"
         t["history"] += [
             {"from": "ready", "to": "suspended", "at": "2026-10-10T00:10:00Z", "by": "human"},
@@ -401,13 +409,13 @@ class InvalidTasks(unittest.TestCase):
         self.assertRejected(t, r"resume must return to 'ready'")
 
     def test_timestamp_backwards(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["status"] = "in_progress"
         t["history"].append({"from": "ready", "to": "in_progress", "at": "2026-10-09T00:00:00Z", "by": "claude-code"})
         self.assertRejected(t, r"timestamp goes backwards")
 
     def test_timestamp_without_timezone(self):
-        t = load("examples/development/task.json")
+        t = load(DEV_READY)
         t["history"][0]["at"] = "2026-10-10T00:00:00"
         self.assertRejected(t, r"date-time with timezone")
 

@@ -1,0 +1,32 @@
+{
+  "schema_version": "0.1",
+  "task_id": "DEV-0000",
+  "task_type": "development",
+  "objective": "新しいタスクを起票するときの最小テンプレート。目的を1〜3文で書く。",
+  "inputs": [],
+  "constraints": [],
+  "acceptance_criteria": [
+    {
+      "id": "AC1",
+      "description": "合格とみなす観察可能な条件を書く",
+      "dimension": "spec_conformance",
+      "verification": { "method": "human" }
+    }
+  ],
+  "failure_conditions": [
+    { "id": "FC1", "description": "失敗とみなす条件を書く", "on_trigger": "escalate" }
+  ],
+  "assigned_agent": "claude-code",
+  "reviewer": "human",
+  "status": "draft",
+  "evidence": [],
+  "quality": {
+    "spec_conformance": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null },
+    "correctness": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null },
+    "completeness": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null }
+  },
+  "retry_count": 0,
+  "max_retries": 2,
+  "escalation_reason": null,
+  "history": []
+}

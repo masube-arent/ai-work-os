@@ -1,0 +1,34 @@
+{
+  "schema_version": "0.1",
+  "task_id": "DEV-9999",
+  "task_type": "development",
+  "objective": "不正なタスク定義の見本。実装者が自分で合格判定し、証拠もない。",
+  "inputs": [],
+  "constraints": [],
+  "acceptance_criteria": [
+    {
+      "id": "AC1",
+      "description": "テストが通る",
+      "dimension": "correctness",
+      "verification": { "method": "command", "command": "python3 -m unittest" }
+    }
+  ],
+  "failure_conditions": [
+    { "id": "FC1", "description": "テストが失敗する", "on_trigger": "rework" }
+  ],
+  "assigned_agent": "claude-code",
+  "reviewer": "claude-code",
+  "status": "passed",
+  "evidence": [],
+  "quality": {
+    "spec_conformance": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null },
+    "correctness": { "verdict": "FAIL", "evidence_ids": [], "judged_by": "codex-cli" },
+    "completeness": { "verdict": "UNVERIFIED", "evidence_ids": [], "judged_by": null }
+  },
+  "retry_count": 5,
+  "max_retries": 2,
+  "escalation_reason": null,
+  "history": [
+    { "from": "draft", "to": "passed", "at": "2026-10-10T00:00:00Z", "by": "claude-code" }
+  ]
+}

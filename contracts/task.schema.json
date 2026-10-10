@@ -1,0 +1,219 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/masube-arent/ai-work-os/contracts/task.schema.json",
+  "title": "AI WORK OS task contract",
+  "description": "Structural rules for a task. Cross-field rules (reviewer independence, evidence references, state transitions, retry limit) live in scripts/validate-task.py and are documented in core/contract.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task_id",
+    "task_type",
+    "objective",
+    "inputs",
+    "constraints",
+    "acceptance_criteria",
+    "failure_conditions",
+    "assigned_agent",
+    "reviewer",
+    "status",
+    "evidence",
+    "quality",
+    "retry_count",
+    "max_retries",
+    "escalation_reason",
+    "history"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.1" },
+    "task_id": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9]*-[0-9]{4,}$",
+      "description": "Stable id such as DEV-0001. Never reused."
+    },
+    "task_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Name of a profile under profiles/<task_type>.md."
+    },
+    "objective": { "type": "string", "minLength": 10 },
+    "inputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/input" }
+    },
+    "constraints": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/criterion" }
+    },
+    "failure_conditions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/failure_condition" }
+    },
+    "assigned_agent": { "$ref": "#/$defs/agent" },
+    "reviewer": { "$ref": "#/$defs/agent" },
+    "status": { "$ref": "#/$defs/status" },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidence" }
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["spec_conformance", "correctness", "completeness"],
+      "properties": {
+        "spec_conformance": { "$ref": "#/$defs/judgment" },
+        "correctness": { "$ref": "#/$defs/judgment" },
+        "completeness": { "$ref": "#/$defs/judgment" }
+      }
+    },
+    "retry_count": { "type": "integer", "minimum": 0 },
+    "max_retries": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3,
+      "description": "Hard cap on automatic rework cycles. Raising the cap above 3 is a policy change, not a task setting."
+    },
+    "escalation_reason": { "type": ["string", "null"] },
+    "history": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transition" }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "escalated" } } },
+      "then": {
+        "properties": { "escalation_reason": { "type": "string", "minLength": 1 } }
+      }
+    }
+  ],
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_-]*$" },
+    "agent": { "enum": ["chatgpt", "claude-code", "codex-cli", "human"] },
+    "status": {
+      "enum": [
+        "draft",
+        "ready",
+        "in_progress",
+        "review",
+        "rework",
+        "passed",
+        "accepted",
+        "escalated",
+        "suspended",
+        "cancelled"
+      ]
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "location", "sensitivity"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": {
+          "enum": ["file", "text", "url", "reference"],
+          "description": "file: repo-relative path. text: inline value. url: public URL. reference: pointer to data held outside the repository."
+        },
+        "location": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "sensitivity": { "enum": ["public", "internal", "confidential"] }
+      }
+    },
+    "criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "dimension", "verification"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "description": { "type": "string", "minLength": 1 },
+        "dimension": { "enum": ["spec_conformance", "correctness", "completeness"] },
+        "verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["method"],
+          "properties": {
+            "method": { "enum": ["command", "inspection", "human"] },
+            "command": { "type": "string", "minLength": 1 },
+            "expected": { "type": "string" }
+          },
+          "if": { "properties": { "method": { "const": "command" } } },
+          "then": { "required": ["command"] }
+        }
+      }
+    },
+    "failure_condition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "description", "on_trigger"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "description": { "type": "string", "minLength": 1 },
+        "on_trigger": { "enum": ["rework", "escalate", "cancel"] }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "produced_by", "created_at", "criterion_ids"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": { "enum": ["command_output", "file", "diff", "review_note", "log"] },
+        "path": { "type": "string" },
+        "command": { "type": "string" },
+        "exit_code": { "type": "integer" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "summary": { "type": "string" },
+        "produced_by": { "$ref": "#/$defs/agent" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "criterion_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" }
+        }
+      },
+      "if": { "properties": { "kind": { "const": "command_output" } } },
+      "then": { "required": ["command", "exit_code"] }
+    },
+    "judgment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["verdict", "evidence_ids", "judged_by"],
+      "properties": {
+        "verdict": { "enum": ["PASS", "FAIL", "UNVERIFIED"] },
+        "evidence_ids": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "judged_by": {
+          "oneOf": [{ "$ref": "#/$defs/agent" }, { "type": "null" }]
+        },
+        "note": { "type": "string" }
+      },
+      "if": { "properties": { "verdict": { "const": "PASS" } } },
+      "then": {
+        "properties": {
+          "evidence_ids": { "minItems": 1 },
+          "judged_by": { "$ref": "#/$defs/agent" }
+        }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "at", "by"],
+      "properties": {
+        "from": { "$ref": "#/$defs/status" },
+        "to": { "$ref": "#/$defs/status" },
+        "at": { "type": "string", "format": "date-time" },
+        "by": { "$ref": "#/$defs/agent" },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

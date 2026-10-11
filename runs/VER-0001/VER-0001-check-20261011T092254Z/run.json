@@ -1,0 +1,54 @@
+{
+  "run_schema_version": "0.2",
+  "run_id": "VER-0001-check-20261011T092254Z",
+  "task_id": "VER-0001",
+  "task_path": "tasks/VER-0001/task.json",
+  "task_type": "development",
+  "role": "check",
+  "agent": "aiwos-runner",
+  "status": "completed",
+  "stop_reason": null,
+  "cli": {
+    "name": "bash",
+    "path": "/usr/bin/bash",
+    "version": "GNU bash, version 5.2.21(1)-release (x86_64-pc-linux-gnu)"
+  },
+  "auth": {
+    "checked": false,
+    "logged_in": null,
+    "method": null,
+    "provider": null
+  },
+  "argv": [
+    "bash",
+    "-c",
+    "<criterion command>"
+  ],
+  "model_requested": null,
+  "models_reported": null,
+  "session_id_reported": null,
+  "cost_usd_reported": null,
+  "num_turns_reported": null,
+  "base_commit": "fccbe7991c7f3635c00bec64d4a73369cf62c866",
+  "target_commit": "8b7072ecf8e194a893d8b1028dfe8a64d72dbb95",
+  "result_commit": null,
+  "branch": null,
+  "task_sha256_at_start": "8e2dce8929f092b830c0457b069db15fbc737b21d581890b9fab56a9de73fafd",
+  "retry_count_at_start": 0,
+  "started_at": "2026-10-11T09:22:54Z",
+  "ended_at": "2026-10-11T09:22:54Z",
+  "duration_s": 0.0,
+  "exit_code": 0,
+  "timeout_s": 120,
+  "changed_files": null,
+  "files": {
+    "checks/AC1.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "checks/AC2.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "checks.json": "705b03f764c71c7947c245b461f25e3745bc1630ae8a51c737c20a54e6e892d6"
+  },
+  "security": {
+    "secret_hits": [],
+    "out_of_scope_paths": [],
+    "workspace_modified_by_reviewer": null
+  }
+}

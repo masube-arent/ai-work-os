@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from controller_harness import ROOT, Sandbox, max_overlap  # noqa: E402
+from controller_harness import ROOT, Sandbox, git, max_overlap  # noqa: E402
 
 sys.path.insert(0, str(ROOT))
 from controller.store import Store, pid_alive  # noqa: E402
@@ -241,9 +241,14 @@ class SourceAndTrust(ControllerCase):
         subprocess.run(["git", "push", "-q", "origin", "aiwos/task/T-0001"], cwd=seed, check=True)
         sb.start()
         self.assertTrue(sb.wait_for(lambda: all_settled(sb, 1), timeout=120), sb.tasks())
-        self.assertEqual(sb.remote_contract("T-0001")["status"], "passed")
         logs = "".join(p.read_text() for p in (sb.state / "logs" / "stages").rglob("*.log"))
-        self.assertNotIn("replaced runner", logs)
+        self.assertNotIn("replaced runner", logs)  # the trusted runner ran every stage
+        # and the publish gate (Security Fix 002) keeps the planted change off the remote
+        refused = [json.loads(e["detail"]) for e in sb.events("publish_gate_refused")]
+        self.assertTrue(any("scripts/aiwos.py" in p for r in refused for p in r), refused)
+        remote_head = git(sb.tmp, "--git-dir", str(sb.remote), "rev-parse", "aiwos/task/T-0001")
+        self.assertEqual(remote_head, subprocess.run(["git", "rev-parse", "HEAD"], cwd=seed, capture_output=True,
+                                                     text=True).stdout.strip())  # nothing new pushed
 
     def test_github_unreachable_at_start_then_recovers(self):
         sb = self.make(n_tasks=1, workers=2)
@@ -271,7 +276,7 @@ class SourceAndTrust(ControllerCase):
         self.assertTrue(sb.events("republished"))
 
     def test_stage_env_drops_tokens(self):
-        cfg = {"state_dir": "/tmp/x", "extra_path": [], "agent_bins": {}}
+        cfg = {"state_dir": "/tmp/x", "workspaces_dir": "/tmp/x/ws", "extra_path": [], "agent_bins": {}}
         os.environ["GH_TOKEN"] = "sentinel"
         try:
             env = stage_env(cfg, "/tmp/wt", 1)
@@ -280,36 +285,27 @@ class SourceAndTrust(ControllerCase):
         self.assertNotIn("GH_TOKEN", env)
         self.assertEqual(env["AIWOS_ROOT"], "/tmp/wt")
 
-    def test_github_mode_opens_one_pr_per_task_and_never_merges(self):
-        sb = self.make(n_tasks=2, workers=2, config={"publish": "github"})
+    def test_github_mode_without_isolation_fails_closed(self):
+        """Security Fix 002: publish=github uses GH_TOKEN. Without a verified
+        agent-user boundary nothing is pushed and gh is never called, while the
+        tasks themselves still run and are recorded locally."""
+        sb = self.make(n_tasks=2, workers=2, config={"publish": "github", "github_repo": "example/repo"})
         gh_log = sb.tmp / "gh.log"
         fake = sb.bin / "gh"
-        fake.write_text(f"""#!{sys.executable}
-import json, sys
-log = {str(gh_log)!r}
-args = sys.argv[1:]
-head = args[args.index("--head") + 1] if "--head" in args else None
-open(log, "a").write(json.dumps(args) + "\\n")
-seen = [json.loads(l) for l in open(log)]
-created = [a for a in seen[:-1] if a[:2] == ["pr", "create"] and a[a.index("--head") + 1] == head]
-if args[:2] == ["pr", "list"]:
-    print("https://example.invalid/pr/" + head if created else "")
-elif args[:2] == ["pr", "create"]:
-    print("https://example.invalid/pr/" + head)
-""")
+        fake.write_text(f"#!/bin/sh\necho \"$@\" >> {gh_log}\n")
         fake.chmod(0o755)
         os.environ["PATH"] = f"{sb.bin}:{os.environ['PATH']}"
         self.addCleanup(lambda: os.environ.__setitem__("PATH", os.environ["PATH"].split(":", 1)[1]))
         sb.start()
         self.assertTrue(sb.wait_for(lambda: all_settled(sb, 2), timeout=180), sb.tasks())
         sb.stop()
-        calls = [json.loads(l) for l in gh_log.read_text().splitlines()]
-        subcommands = {tuple(c[:2]) for c in calls}
-        self.assertLessEqual(subcommands, {("pr", "list"), ("pr", "create")})  # never merge, review or approve
+        self.assertFalse(gh_log.exists(), "gh was called although publishing must fail closed")
         for tid in sb.task_ids:
-            creates = [c for c in calls if c[:2] == ["pr", "create"] and c[c.index("--head") + 1] == f"aiwos/task/{tid}"]
-            self.assertEqual(len(creates), 1, tid)
-            self.assertEqual(creates[0][creates[0].index("--base") + 1], "main")
+            self.assertIsNone(sb.remote_contract(tid))  # nothing pushed
+        blocked = [e for e in sb.events("publish_blocked")]
+        self.assertTrue(blocked)
+        self.assertIn("fail closed", blocked[0]["detail"])
+        self.assertTrue(all(t["gate_sha"] for t in sb.tasks().values()))  # verified, kept local
 
 
 def _claim_all(db_path, worker_id, out):

@@ -21,5 +21,12 @@
   "backoff_max_s": 7200,
   "publish": "git",
   "agent_bins": {},
-  "extra_path": []
+  "extra_path": [],
+  "workspaces_dir": "/var/lib/aiwos/workspaces",
+  "agent_user": "aiwos-agent",
+  "agent_group": "aiwos-ws",
+  "agent_python": "/usr/bin/python3",
+  "credential_files": ["/etc/aiwos/controller.env"],
+  "isolation_check_ttl_s": 600,
+  "github_repo": "masube-arent/ai-work-os"
 }

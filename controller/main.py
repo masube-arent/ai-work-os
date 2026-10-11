@@ -18,7 +18,8 @@ from pathlib import Path
 
 from . import config as config_mod
 from . import gitops, stages
-from .procs import cmdline, kill_tree
+from .procs import cmdline, find_tagged, kill_tree
+from .publishing import ISOLATION_KEY, check_isolation, publish_allowed
 from .store import Store, pid_alive
 
 log = logging.getLogger("controller")
@@ -26,8 +27,15 @@ log = logging.getLogger("controller")
 
 def prepare(cfg):
     state = Path(cfg["state_dir"])
-    for sub in ("logs/stages", "worktrees", "workspaces"):
+    for sub in ("logs/stages", "worktrees"):
         (state / sub).mkdir(parents=True, exist_ok=True)
+    os.chmod(state, 0o700)  # queue, logs and worktrees: trusted side only
+    workspaces = Path(cfg["workspaces_dir"])
+    workspaces.mkdir(parents=True, exist_ok=True)
+    if cfg.get("agent_user"):  # the agent may enter (not list) the workspaces root
+        import grp
+        os.chown(workspaces, -1, grp.getgrnam(cfg["agent_group"]).gr_gid)
+        os.chmod(workspaces, 0o710)
     store = Store(str(state / "aiwos.db"))
     store.init(cfg["workers"], cfg["model_concurrency"])
     return store
@@ -139,6 +147,9 @@ def republish(cfg, store):
     first, so a retry never creates a second one."""
     if cfg["publish"] == "none":
         return
+    allowed, why = publish_allowed(cfg, store)
+    if not allowed:
+        return  # fail closed; the worker already recorded publish_blocked for each task
     repo, remote = cfg["repo_dir"], cfg["remote"]
     rows = store.db.execute("SELECT * FROM tasks WHERE state != 'leased'").fetchall()
     for row in rows:
@@ -148,16 +159,24 @@ def republish(cfg, store):
         branch = gitops.TASK_BRANCH.format(task_id)
         try:
             if gitops.unpublished(repo, remote, task_id):
+                head = gitops.rev(repo, f"refs/heads/{branch}")
+                if head != row["gate_sha"]:  # only commits that passed the publish gate leave the machine
+                    problems = gate_in_scratch_worktree(cfg, task_id, row["contract_path"])
+                    if problems:
+                        store.event("publish_gate_refused", task_id=task_id, detail=problems[:5])
+                        continue
+                    store.record_publish(task_id, {"gate_sha": head})
                 contract = gitops.read_json_at(repo, f"refs/heads/{branch}", row["contract_path"])
                 title, body = gitops.pr_text(task_id, contract)
                 result = gitops.publish(repo, cfg["publish"], remote, cfg["base_branch"], {"task_id": task_id},
-                                        title, body)
+                                        title, body, github_repo=cfg["github_repo"])
             elif cfg["publish"] == "github" and not row["pr_url"] and gitops.ref_exists(
                     repo, f"refs/remotes/{remote}/{branch}"):
                 contract = gitops.read_json_at(repo, f"refs/remotes/{remote}/{branch}", row["contract_path"])
                 title, body = gitops.pr_text(task_id, contract)
                 try:
-                    result = {"pr": gitops.ensure_pull_request(repo, cfg["base_branch"], branch, title, body)}
+                    result = {"pr": gitops.ensure_pull_request(repo, cfg["base_branch"], branch, title, body,
+                                                               github_repo=cfg["github_repo"])}
                 except (gitops.GitError, OSError, subprocess.TimeoutExpired) as exc:
                     result = {"pr_error": str(exc)[:300]}
             else:
@@ -166,6 +185,41 @@ def republish(cfg, store):
             store.event("republished", task_id=task_id, detail=result)
         except Exception as exc:
             store.event("republish_failed", task_id=task_id, detail=str(exc)[:300])
+
+
+def export_isolation_env(cfg):
+    """The controller's own calls into scripts/isolation.py (the probe) read
+    the agent user from the environment, as the runner's do."""
+    if cfg.get("agent_user"):
+        os.environ.update(AIWOS_AGENT_USER=cfg["agent_user"], AIWOS_AGENT_GROUP=cfg["agent_group"],
+                          AIWOS_AGENT_PYTHON=cfg["agent_python"])
+
+
+def refresh_isolation(cfg, store):
+    if not cfg.get("agent_user"):
+        verdict, _ = store.get_meta(ISOLATION_KEY)
+        if verdict is None or verdict.get("ok"):
+            store.set_meta(ISOLATION_KEY, {"ok": False, "reason": "agent_user not configured: AI runs as the "
+                                           "trusted user"})
+        return False
+    return check_isolation(cfg, store)[0]
+
+
+def gate_in_scratch_worktree(cfg, task_id, contract_path):
+    """Run the publish gate for a task branch no worker has checked out (commits
+    made while publishing was off, or recorded before the gate existed)."""
+    from scan_secrets import find_in_text
+    repo = cfg["repo_dir"]
+    scratch = Path(cfg["state_dir"]) / "worktrees" / "gate"
+    gitops.git(repo, "worktree", "prune")
+    if scratch.exists():
+        gitops.git(repo, "worktree", "remove", "--force", str(scratch), check=False)
+    gitops.git(repo, "worktree", "add", "--detach", "--force", str(scratch), f"refs/heads/{gitops.TASK_BRANCH.format(task_id)}")
+    try:
+        return gitops.verify_publishable(repo, scratch, task_id, contract_path,
+                                         f"{cfg['remote']}/{cfg['base_branch']}", cfg["code_dir"], find_in_text)
+    finally:
+        gitops.git(repo, "worktree", "remove", "--force", str(scratch), check=False)
 
 
 def refresh_agents(cfg, store):
@@ -199,6 +253,8 @@ def refresh_agents(cfg, store):
 class Controller:
     def __init__(self, cfg, config_path):
         self.cfg, self.config_path = cfg, str(Path(config_path).resolve())
+        export_isolation_env(cfg)
+        self.last_isolation_check = 0.0
         self.store = prepare(cfg)
         self.procs = {}          # worker_id -> Popen
         self.next_spawn = {}     # worker_id -> earliest respawn time
@@ -255,11 +311,17 @@ class Controller:
                 kill_tree(owner, grace=self.cfg["kill_grace_s"])
                 self.store.event("stale_owner_stopped", worker=lease["lease_owner"], task_id=lease["task_id"],
                                  detail={"pid": owner})
+            # the recorded child, plus anything carrying this lease's tag: the worker
+            # may have died after starting the stage but before recording its pid
+            stage_procs = set(find_tagged(f"{lease['task_id']}:{owner}"))
             if child and pid_alive(child):
-                log.warning("killing orphaned stage process %s of task %s", child, lease["task_id"])
-                kill_tree(child, grace=self.cfg["kill_grace_s"])
-                self.store.event("orphan_killed", task_id=lease["task_id"], detail={"pid": child})
-            if (ours and pid_alive(owner)) or (child and pid_alive(child)):
+                stage_procs.add(child)
+            for proc in stage_procs:
+                log.warning("killing orphaned stage process %s of task %s", proc, lease["task_id"])
+                kill_tree(proc, grace=self.cfg["kill_grace_s"])
+                self.store.event("orphan_killed", task_id=lease["task_id"], detail={"pid": proc})
+            if (ours and pid_alive(owner)) or any(pid_alive(p) for p in stage_procs) or \
+                    find_tagged(f"{lease['task_id']}:{owner}"):
                 continue  # not confirmed gone: never hand the task on beside a running process
             worktree = Path(self.cfg["state_dir"]) / "worktrees" / f"w{lease['lease_owner']:02d}"
             if worktree.exists():
@@ -282,6 +344,11 @@ class Controller:
         for wid in range(1, self.cfg["workers"] + 1):  # sequentially: git worktree add is not concurrency-safe
             gitops.ensure_worktree(self.cfg["repo_dir"],
                                    str(Path(self.cfg["state_dir"]) / "worktrees" / f"w{wid:02d}"), base_ref)
+        try:  # before any worker can publish
+            refresh_isolation(self.cfg, self.store)
+        except Exception as exc:
+            self.store.set_meta(ISOLATION_KEY, {"ok": False, "reason": f"probe error: {exc}"[:300]})
+        self.last_isolation_check = time.time()
         self.store.event("controller_started", detail={"pid": os.getpid(), "workers": self.cfg["workers"],
                                                        "model_concurrency": self.cfg["model_concurrency"]})
         last_sync = 0.0
@@ -297,6 +364,12 @@ class Controller:
                 refresh_agents(self.cfg, self.store)
             except Exception as exc:
                 log.warning("agent check failed: %s", exc)
+            if time.time() - self.last_isolation_check >= self.cfg["isolation_check_ttl_s"] / 2:
+                self.last_isolation_check = time.time()
+                try:
+                    refresh_isolation(self.cfg, self.store)
+                except Exception as exc:  # a probe that cannot run is a failed probe
+                    self.store.set_meta(ISOLATION_KEY, {"ok": False, "reason": f"probe error: {exc}"[:300]})
             self.housekeeping()
             self.supervise_workers()
             end = time.time() + min(self.cfg["poll_interval_s"], 5)

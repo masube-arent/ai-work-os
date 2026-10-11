@@ -6,7 +6,8 @@ MAX_WORKERS = 10
 
 DEFAULTS = {
     "repo_dir": None,                 # controller's own clone of the GitHub repository
-    "state_dir": None,                # SQLite queue, logs, worktrees, workspaces
+    "state_dir": None,                # SQLite queue, logs, worktrees (trusted only; mode 0700)
+    "workspaces_dir": None,           # agent workspaces; default <state_dir>/workspaces. Must be outside a 0700 state_dir when agent_user is set
     "code_dir": None,                 # trusted AI WORK OS checkout whose scripts/ are run; default: this package's repo
     "remote": "origin",
     "base_branch": "main",
@@ -27,6 +28,13 @@ DEFAULTS = {
     "backoff_max_s": 7200,
     "publish": "git",                 # none | git (push branches) | github (push + open PR with gh)
     "agent_bins": {},                 # optional {"claude": path, "codex": path}
+    # --- Security Fix 002: OS-level separation of the AI execution user
+    "agent_user": None,               # unprivileged user for every AI CLI and AI-written command
+    "agent_group": None,              # group shared with the agent user, for workspace trees only
+    "agent_python": "/usr/bin/python3",  # interpreter named in the sudoers rule
+    "credential_files": [],           # files the agent user must not be able to read (token env file, gh/git config)
+    "isolation_check_ttl_s": 600,     # a passed isolation probe is trusted this long
+    "github_repo": None,              # owner/name, for the REST API (publish=github)
     "extra_path": [],                 # prepended to PATH for agents (e.g. where codex is installed)
 }
 
@@ -46,6 +54,8 @@ def load(path):
         if not cfg[key]:
             raise ConfigError(f"{key} is required")
         cfg[key] = str(Path(cfg[key]).expanduser().resolve())
+    cfg["workspaces_dir"] = str(Path(cfg["workspaces_dir"]).expanduser().resolve()) if cfg["workspaces_dir"] \
+        else str(Path(cfg["state_dir"]) / "workspaces")
     cfg["code_dir"] = str(Path(cfg["code_dir"]).expanduser().resolve()) if cfg["code_dir"] \
         else str(Path(__file__).resolve().parent.parent)
     if not 1 <= int(cfg["workers"]) <= MAX_WORKERS:
@@ -54,6 +64,10 @@ def load(path):
         raise ConfigError("model_concurrency must be 1..workers")
     if cfg["publish"] not in ("none", "git", "github"):
         raise ConfigError("publish must be none, git or github")
+    if bool(cfg["agent_user"]) != bool(cfg["agent_group"]):
+        raise ConfigError("agent_user and agent_group go together")
+    if cfg["publish"] == "github" and not cfg["github_repo"]:
+        raise ConfigError("publish=github needs github_repo (owner/name)")
     if cfg["lease_ttl_s"] <= 3 * cfg["heartbeat_s"]:
         raise ConfigError("lease_ttl_s must be more than 3 x heartbeat_s")
     return cfg

@@ -1,0 +1,7 @@
+# /etc/sudoers.d/aiwos — Security Fix 002 (install with: visudo -cf <file>, mode 0440, owner root)
+# The trusted controller user may run exactly one program as the AI execution
+# user: the agent launcher from the root-owned code checkout. Nothing else, no
+# other target user, no password prompt, no environment passed through.
+Defaults:aiwos-ctl !requiretty
+Defaults:aiwos-ctl env_reset
+aiwos-ctl ALL=(aiwos-agent) NOPASSWD: /usr/bin/python3 /opt/aiwos/code/scripts/agent-exec.py *

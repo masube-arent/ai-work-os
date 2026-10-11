@@ -10,6 +10,7 @@ import fnmatch
 import json
 import os
 import subprocess
+import sys
 import time
 
 TASK_BRANCH = "aiwos/task/{}"
@@ -142,7 +143,7 @@ def unpublished(repo, remote, task_id):
     return not ref_exists(repo, remote_ref) or git(repo, "rev-parse", remote_ref) != local
 
 
-def publish(repo, mode, remote, base_branch, task, title, body, env=None):
+def publish(repo, mode, remote, base_branch, task, title, body, env=None, github_repo=None):
     """Push the task branch and its run branches; with mode=github also make
     sure a pull request exists. Never merges. Returns a dict for the event log."""
     if mode == "none":
@@ -159,24 +160,83 @@ def publish(repo, mode, remote, base_branch, task, title, body, env=None):
         # stands, and the sync retries the PR alone (ensure_pull_request never
         # creates a second one)
         try:
-            result["pr"] = ensure_pull_request(repo, base_branch, branch, title, body, env)
+            result["pr"] = ensure_pull_request(repo, base_branch, branch, title, body, env, github_repo)
         except (GitError, OSError, subprocess.TimeoutExpired) as exc:
             result["pr_error"] = str(exc)[:300]
     return result
 
 
-def ensure_pull_request(repo, base_branch, branch, title, body, env=None):
-    """Open a PR for the task branch unless one is already open. Uses only
-    `gh pr list` and `gh pr create` (checked against `gh --help`, 2.89.0)."""
+def ensure_pull_request(repo, base_branch, branch, title, body, env=None, github_repo=None):
+    """Open a PR for the task branch unless one is already open, over GitHub's
+    REST API (`gh api`, no GraphQL): GET /repos/{repo}/pulls?head=owner:branch,
+    then POST /repos/{repo}/pulls. Never merges, reviews or approves."""
+    if not github_repo or "/" not in github_repo:
+        raise GitError("github_repo (owner/name) is required for publish=github")
+    owner = github_repo.split("/")[0]
     run_env = {**os.environ, **(env or {})}
-    found = subprocess.run(["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "url",
-                            "--jq", ".[0].url"], cwd=repo, capture_output=True, text=True, env=run_env, timeout=120)
+    found = subprocess.run(["gh", "api", "-X", "GET", f"repos/{github_repo}/pulls", "-f", "state=open",
+                            "-f", f"head={owner}:{branch}", "-f", f"base={base_branch}", "--jq", ".[0].html_url // empty"],
+                           cwd=repo, capture_output=True, text=True, env=run_env, timeout=120)
     if found.returncode != 0:
-        raise GitError(f"gh pr list failed: {found.stderr.strip()[:300]}")
+        raise GitError(f"GET pulls failed: {found.stderr.strip()[:300]}")
     if found.stdout.strip():
         return found.stdout.strip()
-    made = subprocess.run(["gh", "pr", "create", "--base", base_branch, "--head", branch, "--title", title,
-                           "--body", body], cwd=repo, capture_output=True, text=True, env=run_env, timeout=120)
+    made = subprocess.run(["gh", "api", "-X", "POST", f"repos/{github_repo}/pulls", "-f", f"title={title}",
+                           "-f", f"head={branch}", "-f", f"base={base_branch}", "-f", f"body={body}",
+                           "--jq", ".html_url"], cwd=repo, capture_output=True, text=True, env=run_env, timeout=120)
     if made.returncode != 0:
-        raise GitError(f"gh pr create failed: {made.stderr.strip()[:300]}")
-    return made.stdout.strip().splitlines()[-1] if made.stdout.strip() else None
+        raise GitError(f"POST pulls failed: {made.stderr.strip()[:300]}")
+    return made.stdout.strip() or None
+
+
+# ---------------------------------------------------------------- publish gate
+
+def remote_is_local(repo, remote):
+    """True for a remote on this machine (a path or file:// URL). Read from the
+    raw config so url.*.insteadOf rewriting cannot disguise a network remote."""
+    url = git(repo, "config", "--get", f"remote.{remote}.url", check=False).stdout.strip()
+    return url.startswith("/") or url.startswith("file://")
+
+
+def verify_publishable(repo, worktree, task_id, contract_path, base_ref, code_dir, find_secrets):
+    """Check, as the trusted user, everything that would leave the machine for
+    this task. Returns a list of problems (empty: publishable).
+      - the task branch changes only runs/<task_id>/ and its contract
+      - each run branch changes only the contract's allowed_paths (never runs/)
+      - no changed file contains a credential-shaped string
+      - the contract on the branch passes validate-task (hashes included),
+        using the trusted code_dir, not code from the branch
+    """
+    problems = []
+    branch = TASK_BRANCH.format(task_id)
+    head = rev(repo, f"refs/heads/{branch}")
+    if not head:
+        return [f"{branch} does not exist"]
+    merge_base = git(repo, "merge-base", base_ref, head)
+    contract = json.loads(git(repo, "show", f"{head}:{contract_path}"))
+    allowed = [p.rstrip("/") for p in contract.get("allowed_paths", [])]
+    for path in git(repo, "diff", "--name-only", merge_base, head).splitlines():
+        if not (path == contract_path or path.startswith(f"runs/{task_id}/")):
+            problems.append(f"task branch changes {path}, outside runs/{task_id}/ and the contract")
+        elif find_secrets(_show(repo, head, path)):
+            problems.append(f"credential-shaped text in {path}")
+    for ref in git(repo, "for-each-ref", f"refs/heads/run/{task_id}/", "--format=%(refname)").splitlines():
+        parent = rev(repo, f"{ref}^")
+        for path in git(repo, "diff", "--name-only", parent, ref).splitlines():
+            inside = any(path == p or path.startswith(p + "/") for p in allowed) if allowed else True
+            if path.startswith("runs/") or not inside:
+                problems.append(f"{ref} changes {path}, outside allowed_paths")
+            elif find_secrets(_show(repo, ref, path)):
+                problems.append(f"credential-shaped text in {ref}:{path}")
+    check = subprocess.run([sys.executable, os.path.join(code_dir, "scripts", "validate-task.py"), contract_path],
+                           cwd=worktree, capture_output=True, text=True, timeout=120,
+                           env={**{k: v for k, v in os.environ.items() if k != "GH_TOKEN"}, "AIWOS_ROOT": str(worktree)})
+    if check.returncode != 0:
+        problems.append("contract does not validate: " + check.stdout.strip().splitlines()[-1][:200]
+                        if check.stdout.strip() else f"validate-task exit {check.returncode}")
+    return problems
+
+
+def _show(repo, ref, path):
+    out = git(repo, "show", f"{ref}:{path}", check=False)
+    return out.stdout if out.returncode == 0 else ""

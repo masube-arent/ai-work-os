@@ -11,13 +11,17 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-User=aiwos
-Group=aiwos
+# the trusted controller user (Security Fix 002). It must be able to sudo to the
+# agent user per deploy/isolation/sudoers.aiwos; NoNewPrivileges must stay off so
+# sudo works, and the isolation it relies on is at the OS level, not here.
+User=aiwos-ctl
+Group=aiwos-ctl
+SupplementaryGroups=aiwos-ws
 # trusted code checkout (never a task branch)
 WorkingDirectory=/opt/aiwos/code
 # GH_TOKEN for publish=github lives only here (mode 0600, owned by root); never in the repository
 EnvironmentFile=-/etc/aiwos/controller.env
-Environment=HOME=/var/lib/aiwos/home
+Environment=HOME=/var/lib/aiwos-ctl
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -m controller run --config /etc/aiwos/controller.json
 Restart=always
@@ -29,11 +33,12 @@ KillSignal=SIGTERM
 TimeoutStopSec=180
 
 # --- hardening: the service can write only its state, its clone and its home
-NoNewPrivileges=yes
+# NoNewPrivileges is intentionally OFF: the controller must sudo to the agent
+# user. The AI boundary is the separate agent user, not this flag.
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/var/lib/aiwos /srv/aiwos
+ReadWritePaths=/var/lib/aiwos /var/lib/aiwos-ctl /srv/aiwos
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectKernelLogs=yes

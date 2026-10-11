@@ -50,6 +50,7 @@ ROOT = Path(os.environ["AIWOS_ROOT"]).resolve() if os.environ.get("AIWOS_ROOT") 
 sys.path.insert(0, str(HERE))
 from adapters import ADAPTERS, scrubbed_env  # noqa: E402
 from scan_secrets import find_in_text  # noqa: E402
+import isolation  # noqa: E402
 
 
 def _load(name, filename):
@@ -249,24 +250,59 @@ def workspace_root():
     return Path(os.environ.get("AIWOS_WORKSPACES", Path.home() / ".cache" / "aiwos" / "workspaces"))
 
 
-def make_workspace(commit, run_id):
-    """A fresh git repo holding the tree of `commit` without runs/. It shares no
-    objects with this repository, so other runs' branches are not reachable
-    through git. Returns (path, its base commit)."""
-    ws = workspace_root() / run_id
-    ws.mkdir(parents=True)
-    tar = subprocess.run(["git", "archive", "--format=tar", commit, "--", ".", ":(exclude)runs"],
-                         cwd=ROOT, capture_output=True, check=True).stdout
-    subprocess.run(["tar", "-x", "-C", str(ws)], input=tar, check=True)
-    git("init", "-q", cwd=ws)
-    git("add", "-A", cwd=ws)
-    git("-c", "user.name=aiwos-runner", "-c", "user.email=aiwos-runner@localhost",
-        "commit", "-q", "-m", f"aiwos base {commit}", cwd=ws)
-    return ws, git("rev-parse", "HEAD", cwd=ws)
+class Workspace:
+    """One run's workspace, split so the agent can reach only what it needs:
+      tree/  the files of `commit` without runs/ (all the agent sees; writable
+             for a worker or a check, read-only for a reviewer)
+      out/   where an agent CLI may write its own output files
+      git/   git metadata for tree/, owned by the trusted side only. Keeping it
+             out of tree/ means an agent cannot plant git config or hooks
+             (core.fsmonitor, hooks) that the trusted side would then run.
+    It shares no objects with this repository, so other runs' branches are not
+    reachable through git."""
+
+    SAFE = ["-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "core.untrackedCache=false"]
+
+    def __init__(self, commit, run_id, writable):
+        root = workspace_root()
+        root.mkdir(parents=True, exist_ok=True)
+        isolation.traversable(root)
+        self.root = root / run_id
+        self.root.mkdir()
+        self.tree, self.out, self.gitdir = self.root / "tree", self.root / "out", self.root / "git"
+        for d in (self.tree, self.out, self.gitdir):
+            d.mkdir()
+        os.chmod(self.gitdir, 0o700)
+        tar = subprocess.run(["git", "archive", "--format=tar", commit, "--", ".", ":(exclude)runs"],
+                             cwd=ROOT, capture_output=True, check=True).stdout
+        subprocess.run(["tar", "-x", "-C", str(self.tree)], input=tar, check=True)
+        self.git("init", "-q")
+        self.git("add", "-A")
+        self.git("-c", "user.name=aiwos-runner", "-c", "user.email=aiwos-runner@localhost",
+                 "commit", "-q", "-m", f"aiwos base {commit}")
+        self.base = self.git("rev-parse", "HEAD")
+        isolation.traversable(self.root)
+        isolation.share(self.tree, writable)
+        isolation.share(self.out, True)
+
+    def git(self, *args, raw=False):
+        out = subprocess.run(["git", *self.SAFE, f"--git-dir={self.gitdir}", f"--work-tree={self.tree}", *args],
+                             cwd=self.tree, capture_output=True, check=True,
+                             env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"})
+        return out.stdout if raw else out.stdout.decode().strip()
+
+
+def make_workspace(commit, run_id, writable=True):
+    ws = Workspace(commit, run_id, writable)
+    return ws, ws.base
 
 
 def execute(argv, cwd, env, stdin_text, timeout):
+    """Run an untrusted command (an agent CLI or an acceptance command): as the
+    agent user when isolation is configured. The agent-side launcher gets a
+    slightly longer deadline so this one fires first and is recorded."""
     start = time.monotonic()
+    argv, env, cwd = isolation.wrap(argv, env, cwd, timeout + 30)
     proc = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True)
     state = "exited"
@@ -274,13 +310,20 @@ def execute(argv, cwd, env, stdin_text, timeout):
         out, err = proc.communicate(stdin_text.encode() if stdin_text is not None else None, timeout=timeout)
     except (subprocess.TimeoutExpired, KeyboardInterrupt) as exc:
         state = "timeout" if isinstance(exc, subprocess.TimeoutExpired) else "interrupted"
-        os.killpg(proc.pid, signal.SIGTERM)
+        _killpg(proc.pid, signal.SIGTERM)  # under isolation sudo relays this to the agent side
         try:
-            out, err = proc.communicate(timeout=10)
+            out, err = proc.communicate(timeout=15)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGKILL)
+            _killpg(proc.pid, signal.SIGKILL)  # the agent-side launcher dies with its parent
             out, err = proc.communicate()
     return state, proc.returncode, out or b"", err or b"", round(time.monotonic() - start, 1)
+
+
+def _killpg(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
 
 
 def commit_patch(base, patch, branch, message):
@@ -442,12 +485,14 @@ def cmd_run(args):
                                                              f"'{adapter.cli}' not found on PATH")
     run_id = f"{task['task_id']}-{role}-{stamp()}"
     run_dir = RUNS / task["task_id"] / run_id
-    argv = adapter.argv(cli_path or adapter.cli, role, workspace_root() / run_id, run_dir, REVIEW_SCHEMA, args.model)
+    ws_root = workspace_root() / run_id
+    argv = adapter.argv(cli_path or adapter.cli, role, ws_root / "tree", ws_root / "out", REVIEW_SCHEMA, args.model)
 
     if not args.execute:
         print(json.dumps({"dry_run": True, "task": task["task_id"], "role": role, "agent": agent, "cli": cli,
                           "auth": auth, "refusal": refusal, "argv": argv, "stdin": "prompt (below)",
-                          "base_or_target_commit": base, "workspace": str(workspace_root() / run_id),
+                          "base_or_target_commit": base, "workspace": str(ws_root / "tree"),
+                          "agent_user": isolation.agent_user(),
                           "timeout_s": timeout, "prompt_sha256": sha256(prompt.encode())},
                          ensure_ascii=False, indent=2))
         print("\n----- prompt -----\n" + prompt)
@@ -470,33 +515,30 @@ def cmd_run(args):
             transition(task, "in_progress", f"worker run {run_id} started")
             task_sha = write_task(path, task, task_sha)
 
-        ws, ws_base = make_workspace(base, run_id)
+        ws, ws_base = make_workspace(base, run_id, writable=(role == "worker"))
         store(run_dir, rec, "prompt.md", prompt.encode())
-        print(f"running {agent} ({cli['version']}) as {role} in {ws} (timeout {timeout}s) ...", flush=True)
-        state, code, out, err, duration = execute(argv, ws, adapter.env(), prompt, timeout)
-        parsed = adapter.parse(out.decode("utf-8", errors="replace"), run_dir)
+        print(f"running {agent} ({cli['version']}) as {role} in {ws.tree} (timeout {timeout}s) ...", flush=True)
+        state, code, out, err, duration = execute(argv, ws.tree, adapter.env(), prompt, timeout)
+        parsed = adapter.parse(out.decode("utf-8", errors="replace"), ws.out)
         rec.update(exit_code=code, duration_s=duration, models_reported=parsed["models_reported"],
                    session_id_reported=parsed["session_id"], cost_usd_reported=parsed["cost_usd"],
                    num_turns_reported=parsed["num_turns"])
 
         leaked = scan(rec, "stdout", out) | scan(rec, "stderr", err)
-        last_msg = run_dir / "last-message.txt"
-        if last_msg.is_file():
-            leaked |= scan(rec, "last-message.txt", last_msg.read_bytes())
-            if leaked:
-                last_msg.unlink()
-            else:
-                rec["files"]["last-message.txt"] = sha256(last_msg.read_bytes())
+        data = isolation.read_untrusted(ws.out / "last-message.txt", OUTPUT_CAP)  # agent-written: untrusted
+        if data is not None:
+            leaked |= scan(rec, "last-message.txt", data)
+            if not leaked:
+                store(run_dir, rec, "last-message.txt", data)
 
         if role == "worker":
-            git("add", "-A", cwd=ws)
-            new_patch = subprocess.run(["git", "diff", "--cached", "--binary", ws_base], cwd=ws,
-                                       capture_output=True, check=True).stdout
-            rec["changed_files"] = git("diff", "--cached", "--name-only", ws_base, cwd=ws).splitlines()
+            ws.git("add", "-A")
+            new_patch = ws.git("diff", "--cached", "--binary", ws_base, raw=True)
+            rec["changed_files"] = ws.git("diff", "--cached", "--name-only", ws_base).splitlines()
             leaked |= scan(rec, "patch.diff", new_patch)
             rec["security"]["out_of_scope_paths"] = out_of_scope(task, rec["changed_files"])
         else:
-            modified = bool(git("status", "--porcelain", cwd=ws)) or git("rev-parse", "HEAD", cwd=ws) != ws_base
+            modified = bool(ws.git("status", "--porcelain")) or ws.git("rev-parse", "HEAD") != ws_base
             rec["security"]["workspace_modified_by_reviewer"] = modified
 
         out_name = "agent-stdout.jsonl" if adapter.cli == "codex" else "agent-stdout.json"
@@ -610,11 +652,12 @@ def cmd_check(args):
                           "version": bash[:120]}, timeout)
         rec.update(base_commit=worker_run["base_commit"], target_commit=target,
                    argv=["bash", "-c", "<criterion command>"])
-        ws, _ = make_workspace(target, run_id)
+        ws, _ = make_workspace(target, run_id, writable=True)
         results, leaked, started = [], False, time.monotonic()
         for c in commands:
             expected = c["verification"].get("expected_exit_code", 0)
-            state, code, out, err, duration = execute(["bash", "-c", c["verification"]["command"]], ws,
+            # acceptance commands run code the agent wrote: as the agent user too
+            state, code, out, err, duration = execute(["bash", "-c", c["verification"]["command"]], ws.tree,
                                                       scrubbed_env(), None, timeout)
             log = out + (b"\n--- stderr ---\n" + err if err else b"")
             if scan(rec, f"checks/{c['id']}.log", log):

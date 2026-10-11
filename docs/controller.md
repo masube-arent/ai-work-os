@@ -110,26 +110,38 @@ PR 作成だけが失敗した場合、同期のたびに PR 作成だけを再�
   ワーカー・段階のログはローカル（`state/logs`）に残り、push されない。
 - **OS レベルの隔離**: systemd ユニットで専用ユーザー・`ProtectSystem=strict`・`ProtectHome`・
   書き込み可能パスの限定・`NoNewPrivileges` を設定する。ワーカーごとの別ユーザーやコンテナ分離は未実装（下記）。
-- **【未解決】エージェントから認証情報が読める**（2026-10-11 実測）: 環境変数を除いても、エージェントは
-  controller・ワーカーと同じ OS ユーザーで動くため、祖先プロセスの `/proc/<pid>/environ`（`GH_TOKEN` を含む）や、
-  `HOME` 内の git・gh の認証情報ファイルを読める。Claude のワーカーは `python3 -m unittest` しか実行できないが、
-  自分で書いたテストファイルを実行できるため、任意の Python を実行できるのと同じである。
-  **このため `publish: github`（および push 用の認証情報を置いた `publish: git`）での無人運転は、エージェントを
-  別ユーザーで動かす隔離ができるまで安全とは言えない。** 運用するかどうかは人間の判断とする。
-  被害を小さくする設定: このリポジトリだけを対象にした fine-grained token（contents・pull requests の write のみ）、
-  main のブランチ保護（PR 必須・人間のレビュー必須・管理者も対象）。
+- **AI 実行ユーザーの OS レベル分離（Security Fix 002）**: 信頼済みの controller・ワーカー・GitHub publisher は
+  `agent_user`（例 aiwos-ctl）で動き、AI の CLI と AI が書いたコード・テスト・シェルコマンドはすべて非特権の
+  `agent_user`（例 aiwos-agent）で動く。両者は workspace 用の `agent_group` だけを共有する。
+  - ワーカーは `sudo -n -u <agent_user> -- python3 scripts/agent-exec.py ... -- <argv>` でエージェント側を起動する
+    （`scripts/isolation.py`）。sudoers はこの 1 コマンドだけを許可する（`deploy/isolation/`）。
+  - `agent-exec.py` はエージェント側のプロセスを新しいセッションで起動し、環境は引数で渡した許可リストだけにする
+    （`GH_TOKEN` 等は一切渡らない）。親（sudo）が消えれば自分も終わり、タイムアウトでセッションごと停止する。
+  - エージェントが触れるのは workspace の `tree/`（worker/check は書込可、reviewer は読取専用）と `out/` だけ。
+    git メタデータは `git/` に分離し、エージェントは触れない（core.hooksPath 等を仕込めない）。
+  - **フェイルクローズ**: ネットワークリモートへの push と `publish: github` は、エージェント user として実行する
+    侵入テスト（`scripts/isolation-probe.py`）が「トークン env ファイル・信頼済み state・親プロセスの
+    `/proc/<pid>/environ`・設定した認証情報ファイルを読めず、信頼済みコード・state・リポジトリに書けない」ことを
+    確認できている間だけ許可される。確認できなければ publish しない（記録はローカルに残す）。
+    `fs.protected_hardlinks=1` も必須とする。
+  - **publish ゲート**: publisher は、タスクブランチが `runs/<task>/` と契約以外を変更していないこと、各 run
+    ブランチが `allowed_paths` 内だけを変更していること、秘密情報らしき文字列が無いこと、信頼済みコードで契約が
+    検証できることを確認した差分だけを push する。
+  - 隔離されていない設定（`agent_user` 未設定）では、AI は信頼済みユーザーと同じ権限で動くため、ネットワークへの
+    publish はフェイルクローズする（ローカルパスの remote への `publish: git` は可）。
 
 ## 配置手順（Ubuntu VPS）
 
 ```bash
-# 1. 専用ユーザーとディレクトリ
-sudo useradd --system --home-dir /var/lib/aiwos/home --create-home --shell /usr/sbin/nologin aiwos
-sudo mkdir -p /opt/aiwos /srv/aiwos /var/lib/aiwos/state /etc/aiwos
-sudo chown aiwos:aiwos /srv/aiwos /var/lib/aiwos /var/lib/aiwos/state
-
-# 2. 信頼済みコード（タグ付きのコミットを使う）と作業用クローン
+# 1. 信頼済みユーザー・AI 実行ユーザー・共有グループと sudoers を作る（Security Fix 002）
 sudo git clone https://github.com/masube-arent/ai-work-os /opt/aiwos/code
-sudo -u aiwos git clone https://github.com/masube-arent/ai-work-os /srv/aiwos/repo
+sudo bash /opt/aiwos/code/deploy/isolation/setup.sh /opt/aiwos/code aiwos-ctl aiwos-agent aiwos-ws
+sudo mkdir -p /srv/aiwos /var/lib/aiwos/state /var/lib/aiwos/workspaces /etc/aiwos
+sudo chown aiwos-ctl:aiwos-ctl /srv/aiwos /var/lib/aiwos /var/lib/aiwos/state
+sudo chown aiwos-ctl:aiwos-ws /var/lib/aiwos/workspaces   # agent_group で共有
+
+# 2. 作業用クローン（信頼済みコードは手順1で /opt/aiwos/code に置いた）
+sudo -u aiwos-ctl git clone https://github.com/masube-arent/ai-work-os /srv/aiwos/repo
 sudo apt-get install -y python3-jsonschema git    # または pip install -r requirements.txt
 
 # 3. 設定と認証情報（トークンは publish=github のときだけ）
@@ -137,10 +149,12 @@ sudo cp /opt/aiwos/code/config/controller.example.json /etc/aiwos/controller.jso
 sudo install -m 0600 /dev/null /etc/aiwos/controller.env   # GH_TOKEN=... を書く
 #    push に使う git の認証情報は aiwos ユーザーの credential helper 等で設定する
 
-# 4. エージェントのログイン（aiwos ユーザーで。API キーは使わない）
-sudo -u aiwos -H claude auth login          # サブスクリプションでログイン
-sudo -u aiwos -H codex login --device-auth  # ChatGPT アカウントでログイン
-sudo -u aiwos -H python3 /opt/aiwos/code/scripts/aiwos.py auth   # 両方 usable: true を確認
+# 4. エージェントのログイン（AI 実行ユーザー aiwos-agent で。API キーは使わない）
+sudo -u aiwos-agent -H claude auth login          # サブスクリプションでログイン
+sudo -u aiwos-agent -H codex login --device-auth  # ChatGPT アカウントでログイン
+# config に agent_user/agent_group/credential_files/github_repo を設定し、
+# GH_TOKEN は /etc/aiwos/controller.env（aiwos-ctl だけが読める 0600）に置く
+sudo -u aiwos-ctl python3 -m controller sync-once --config /etc/aiwos/controller.json  # isolation ok を確認
 
 # 5. 事前検証（本番配置前に全テスト）
 cd /opt/aiwos/code && bash scripts/check.sh

@@ -300,5 +300,132 @@ class FullCycleIsolated(IsolationBase):
         self.assertTrue(meta["isolation"]["ok"], meta["isolation"])
 
 
+import tempfile as _tempfile
+from controller import gitops, publishing  # noqa: E402
+from controller.store import Store  # noqa: E402
+
+
+def _git(repo, *a):
+    import subprocess
+    subprocess.run(["git", "-C", str(repo), *a], check=True, capture_output=True)
+
+
+class EffectivePushUrls(unittest.TestCase):
+    """Item 1/2: remote_is_local must reflect git's real push target, including
+    pushurl, multiple URLs, insteadOf and pushInsteadOf; unknown => not local."""
+
+    def setUp(self):
+        self.d = Path(_tempfile.mkdtemp(prefix="aiwos-url-"))
+        self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
+        self.repo = self.d / "r"
+        self.repo.mkdir()
+        _git(self.repo, "init", "-q")
+
+    def local(self):
+        return gitops.remote_is_local(self.repo, "origin")[0]
+
+    def test_local_url_only(self):
+        _git(self.repo, "remote", "add", "origin", "/srv/aiwos/remote.git")
+        self.assertTrue(self.local())
+
+    def test_file_url_is_local(self):
+        _git(self.repo, "remote", "add", "origin", "file:///srv/aiwos/remote.git")
+        self.assertTrue(self.local())
+
+    def test_network_url_is_not_local(self):
+        _git(self.repo, "remote", "add", "origin", "https://github.com/x/y.git")
+        self.assertFalse(self.local())
+
+    def test_scp_like_url_is_not_local(self):
+        _git(self.repo, "remote", "add", "origin", "git@github.com:x/y.git")
+        self.assertFalse(self.local())
+
+    def test_pushurl_to_network_over_local_url_is_not_local(self):
+        _git(self.repo, "remote", "add", "origin", "/srv/aiwos/remote.git")
+        _git(self.repo, "config", "remote.origin.pushurl", "https://github.com/x/y.git")
+        self.assertFalse(self.local())
+
+    def test_one_of_several_pushurls_network_is_not_local(self):
+        _git(self.repo, "remote", "add", "origin", "/srv/aiwos/remote.git")
+        _git(self.repo, "config", "remote.origin.pushurl", "/srv/aiwos/a.git")
+        _git(self.repo, "config", "--add", "remote.origin.pushurl", "https://github.com/x/y.git")
+        self.assertFalse(self.local())
+        self.assertEqual(len(gitops.remote_is_local(self.repo, "origin")[1]), 2)
+
+    def test_pushInsteadOf_rewrites_local_to_network(self):
+        _git(self.repo, "remote", "add", "origin", "/srv/aiwos/remote.git")
+        _git(self.repo, "config", "url.https://github.com/.pushInsteadOf", "/srv/aiwos/")
+        self.assertFalse(self.local())
+
+    def test_insteadOf_rewrites_local_to_network(self):
+        _git(self.repo, "remote", "add", "origin", "/srv/aiwos/remote.git")
+        _git(self.repo, "config", "url.https://github.com/.insteadOf", "/srv/aiwos/")
+        self.assertFalse(self.local())
+
+    def test_no_remote_is_not_local(self):
+        self.assertFalse(self.local())  # fail closed when git reports no push URL
+
+
+class Gates(unittest.TestCase):
+    """Item 4: execution and publish gates, with and without credentials."""
+
+    def setUp(self):
+        self.d = Path(_tempfile.mkdtemp(prefix="aiwos-gate-"))
+        self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
+        self.store = Store(str(self.d / "q.db"))
+        self.store.init(1, 1)
+        self.saved = {k: os.environ.pop(k, None) for k in publishing.TOKEN_ENV}
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        for k, v in self.saved.items():
+            if v is not None:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
+
+    def cfg(self, **kw):
+        base = {"isolation_check_ttl_s": 600, "credential_files": [], "publish": "none", "repo_dir": str(self.d),
+                "remote": "origin"}
+        base.update(kw)
+        return base
+
+    def mark_isolated(self, ok=True):
+        self.store.set_meta(publishing.ISOLATION_KEY, {"ok": ok, "reason": None if ok else "probe said no"})
+
+    def test_no_credentials_runs_without_isolation(self):
+        ok, why = publishing.execution_allowed(self.cfg(), self.store)
+        self.assertTrue(ok, why)
+
+    def test_token_in_env_blocks_execution_without_isolation(self):
+        os.environ["GH_TOKEN"] = "sentinel-" + "x" * 10
+        ok, why = publishing.execution_allowed(self.cfg(), self.store)
+        self.assertFalse(ok)
+        self.assertIn("fail closed", why)
+        self.assertNotIn("sentinel", why)  # the value is never echoed
+
+    def test_credential_file_blocks_execution_without_isolation(self):
+        f = self.d / "controller.env"
+        f.write_text("GH_TOKEN=sentinel")
+        ok, why = publishing.execution_allowed(self.cfg(credential_files=[str(f)]), self.store)
+        self.assertFalse(ok)
+
+    def test_isolation_allows_execution_even_with_token(self):
+        os.environ["GH_TOKEN"] = "sentinel-" + "x" * 10
+        self.mark_isolated(True)
+        ok, why = publishing.execution_allowed(self.cfg(), self.store)
+        self.assertTrue(ok, why)
+
+    def test_stale_isolation_with_token_blocks_execution(self):
+        os.environ["GH_TOKEN"] = "sentinel-" + "x" * 10
+        self.store.set_meta(publishing.ISOLATION_KEY, {"ok": True, "reason": None})
+        # force the stored timestamp into the distant past
+        with self.store.tx() as db:
+            db.execute("UPDATE meta SET updated_at=0 WHERE key=?", (publishing.ISOLATION_KEY,))
+        ok, why = publishing.execution_allowed(self.cfg(), self.store)
+        self.assertFalse(ok)
+        self.assertIn("stale", why)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -156,8 +156,12 @@ class Sandbox:
         path.write_text(json.dumps(current))
 
     def env(self):
-        env = dict(os.environ, GH_TOKEN="sentinel-gh-token-for-controller-only")
-        env.pop("AIWOS_ROOT", None)
+        # stub tests carry no GitHub credential, so the execution gate (Security
+        # Fix 002 item 4) lets them run without OS-level isolation. Tests that
+        # need a credential present set it themselves.
+        env = dict(os.environ)
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "AIWOS_ROOT"):
+            env.pop(name, None)
         return env
 
     def start(self):

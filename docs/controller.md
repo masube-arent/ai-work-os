@@ -119,7 +119,16 @@ PR 作成だけが失敗した場合、同期のたびに PR 作成だけを再�
     （`GH_TOKEN` 等は一切渡らない）。親（sudo）が消えれば自分も終わり、タイムアウトでセッションごと停止する。
   - エージェントが触れるのは workspace の `tree/`（worker/check は書込可、reviewer は読取専用）と `out/` だけ。
     git メタデータは `git/` に分離し、エージェントは触れない（core.hooksPath 等を仕込めない）。
-  - **フェイルクローズ**: ネットワークリモートへの push と `publish: github` は、エージェント user として実行する
+  - **AI 実行のフェイルクローズ（Security Fix 002-2 / 監査 item 4）**: GitHub の認証情報（`GH_TOKEN` 等の環境変数、
+    または `credential_files` に挙げたファイル）が、AI と同じ OS ユーザーから読める状態では、`publish: none` でも
+    ローカル宛てでも、untrusted な段階（work / check / review）を実行しない。隔離が確認済みなら実行する
+    （AI は別ユーザーで読めない）。認証情報が一切無い場合も実行する（スタブ試験）。該当時はタスクを waiting にして
+    保留し、隔離の確認が取れるか認証情報が外れると自動で再開する。
+  - **ローカルremote の判定（監査 item 1）**: `publish: git` のローカル例外は、`git remote get-url --push --all` が返す
+    **実効 push 先がすべてローカルパス（`/` か `file:///`）で、かつ 1 件以上ある場合のみ**許可する。`pushurl`・複数 push 先・
+    `insteadOf`・`pushInsteadOf` による書換はこのコマンドに反映されるため、ネットワーク宛てを見逃さない。判定不能・混在は
+    ローカルとみなさない（フェイルクローズ）。
+  - **publish のフェイルクローズ**: ネットワーク push と `publish: github` は、エージェント user として実行する
     侵入テスト（`scripts/isolation-probe.py`）が「トークン env ファイル・信頼済み state・親プロセスの
     `/proc/<pid>/environ`・設定した認証情報ファイルを読めず、信頼済みコード・state・リポジトリに書けない」ことを
     確認できている間だけ許可される。確認できなければ publish しない（記録はローカルに残す）。

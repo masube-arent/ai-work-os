@@ -191,11 +191,30 @@ def ensure_pull_request(repo, base_branch, branch, title, body, env=None, github
 
 # ---------------------------------------------------------------- publish gate
 
+def effective_push_urls(repo, remote):
+    """Every URL git would actually push to for `remote`, as git itself computes
+    them: pushurl over url, every configured push URL, and url.*.insteadOf /
+    url.*.pushInsteadOf rewriting applied. Returns [] if git reports none."""
+    out = git(repo, "remote", "get-url", "--push", "--all", remote, check=False)
+    if out.returncode != 0:
+        return []
+    return [u.strip() for u in out.stdout.splitlines() if u.strip()]
+
+
+def url_is_local(url):
+    """A URL that stays on this machine: an absolute path or a file:// URL.
+    Everything else — https/ssh/git schemes and scp-like host:path — is remote."""
+    return url.startswith("/") or url.startswith("file:///")
+
+
 def remote_is_local(repo, remote):
-    """True for a remote on this machine (a path or file:// URL). Read from the
-    raw config so url.*.insteadOf rewriting cannot disguise a network remote."""
-    url = git(repo, "config", "--get", f"remote.{remote}.url", check=False).stdout.strip()
-    return url.startswith("/") or url.startswith("file://")
+    """True only if EVERY effective push target is a local path and there is at
+    least one. Unknown or mixed targets are treated as not local (fail closed),
+    so a pushurl, extra push URL, or insteadOf/pushInsteadOf rewrite that sends
+    to the network is never mistaken for local. Returns (is_local, urls)."""
+    urls = effective_push_urls(repo, remote)
+    is_local = bool(urls) and all(url_is_local(u) for u in urls)
+    return is_local, urls
 
 
 def verify_publishable(repo, worktree, task_id, contract_path, base_ref, code_dir, find_secrets):

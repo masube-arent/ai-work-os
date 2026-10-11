@@ -1,14 +1,21 @@
-"""When the trusted side may publish (Security Fix 002).
+"""When the trusted side may run AI and may publish (Security Fix 002).
 
-Publishing needs credentials. If an AI process could read them, publishing
-unattended would hand them to the AI, so it fails closed:
+Two gates, both fail closed:
 
-  - publish=none                      never publishes
-  - publish=git to a local path       allowed (no credential leaves the machine)
-  - any network remote, or publish=github (which always uses GH_TOKEN):
-        only while a recent isolation probe, run as the agent user, proved it
-        cannot read the token, /proc of the trusted processes, the configured
-        credential files, or write the trusted code, state and repository
+execution_allowed — may an untrusted stage (an AI CLI, or a command an AI
+  wrote) run at all? If a GitHub credential is readable by the OS user the
+  agent runs as, running the AI would expose it (env vars are scrubbed, but a
+  same-user process still reads /proc and credential files), so AI is run only
+  when isolation is verified OR no credential is present at all. A stub test
+  carrying no credential keeps running without isolation.
+
+publish_allowed — may results be pushed?
+  - publish=none                      never
+  - publish=git, every push URL local allowed (nothing leaves the machine)
+  - a network push URL, or publish=github (which uses GH_TOKEN): only while a
+    recent agent-user probe proved it cannot read the token, the trusted
+    processes' /proc, the configured credential files, or write trusted code,
+    state or the repository
 """
 import os
 import time
@@ -17,19 +24,56 @@ from pathlib import Path
 from . import gitops
 
 ISOLATION_KEY = "isolation"
+# A GitHub credential in the controller/worker environment that a same-user
+# agent could read. Credential files are named in cfg["credential_files"].
+TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+
+
+def isolation_verified(cfg, store):
+    verdict, checked_at = store.get_meta(ISOLATION_KEY)
+    if not verdict or not verdict.get("ok"):
+        return False, (verdict or {}).get("reason", "isolation never verified")
+    if time.time() - checked_at > cfg["isolation_check_ttl_s"]:
+        return False, "isolation check is stale"
+    return True, "isolation verified"
+
+
+def credentials_exposed(cfg):
+    """A credential a same-OS-user agent could read: a token in this process's
+    environment, or a configured credential file that exists. Returns (bool,
+    what) — `what` never contains the credential value, only where it is."""
+    present = [name for name in TOKEN_ENV if os.environ.get(name)]
+    files = [f for f in cfg.get("credential_files", []) if Path(f).exists()]
+    if present or files:
+        return True, {"env": present, "files": files}
+    return False, {}
+
+
+def execution_allowed(cfg, store):
+    """May an untrusted stage run? Isolated: yes. Not isolated but no credential
+    anywhere: yes (stub tests). Not isolated with a credential present: no."""
+    ok, why = isolation_verified(cfg, store)
+    if ok:
+        return True, why
+    exposed, what = credentials_exposed(cfg)
+    if not exposed:
+        return True, "no credentials present; AI may run unisolated"
+    return False, (f"AI execution disabled (fail closed): a GitHub credential is readable by the agent's OS "
+                   f"user and isolation is not verified ({why}); exposed: {what}")
 
 
 def publish_allowed(cfg, store):
     if cfg["publish"] == "none":
         return False, "publish=none"
-    if cfg["publish"] == "git" and gitops.remote_is_local(cfg["repo_dir"], cfg["remote"]):
-        return True, "local remote"
-    verdict, checked_at = store.get_meta(ISOLATION_KEY)
-    if not verdict or not verdict.get("ok"):
-        why = (verdict or {}).get("reason", "isolation never verified")
+    if cfg["publish"] == "git":
+        is_local, urls = gitops.remote_is_local(cfg["repo_dir"], cfg["remote"])
+        if is_local:
+            return True, f"local remote ({', '.join(urls)})"
+        # a git remote whose effective push target is network (pushurl, extra
+        # URL, or insteadOf/pushInsteadOf rewrite) needs isolation like github
+    ok, why = isolation_verified(cfg, store)
+    if not ok:
         return False, f"publishing disabled (fail closed): {why}"
-    if time.time() - checked_at > cfg["isolation_check_ttl_s"]:
-        return False, "publishing disabled (fail closed): isolation check is stale"
     return True, "isolation verified"
 
 

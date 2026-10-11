@@ -17,7 +17,11 @@ import time
 from pathlib import Path
 
 from . import gitops, stages
-from .publishing import publish_allowed
+from .publishing import execution_allowed, publish_allowed
+
+# stages that run untrusted code (an AI CLI, or an acceptance command an AI may
+# have written); 'judge' and 'resume' are trusted (no untrusted code runs)
+UNTRUSTED_STAGES = {"work", "check", "review"}
 from .procs import kill_tree
 from .store import MODEL_STAGES, Store
 
@@ -174,6 +178,18 @@ class Worker:
 
     def handle(self, task):
         cfg, tid, stage = self.cfg, task["task_id"], task["stage"]
+        if stage in UNTRUSTED_STAGES:
+            # Security Fix 002 item 4: never run AI while a GitHub credential is
+            # readable by the agent's OS user and isolation is unverified — even
+            # for publish=none or a local remote. Park, don't hold: it clears when
+            # isolation is verified or the credential is removed.
+            allowed, why = execution_allowed(cfg, self.store)
+            if not allowed:
+                self.store.finish(self.id, self.pid, tid, stage=stage, agent=task["agent"], state="waiting",
+                                  reason=why, delay=max(60, cfg["isolation_check_ttl_s"] // 2),
+                                  refund_attempt=True)  # nothing ran: this claim does not count
+                self.log.warning("task %s: %s", tid, why)
+                return
         model_stage = stage in MODEL_STAGES
         if model_stage and task["ai_runs"] >= cfg["max_ai_runs_per_task"]:
             self.store.finish(self.id, self.pid, tid, stage=stage, agent=task["agent"], state="held",

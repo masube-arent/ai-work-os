@@ -308,6 +308,30 @@ class SourceAndTrust(ControllerCase):
         self.assertTrue(all(t["gate_sha"] for t in sb.tasks().values()))  # verified, kept local
 
 
+class ExecutionGate(ControllerCase):
+    """Security Fix 002 item 4: with a credential readable by the agent's OS user
+    and no isolation, no AI stage runs — even for a local remote — but the stub
+    tests that carry no credential keep running (verified by every other test)."""
+
+    def test_credential_present_without_isolation_parks_the_stage(self):
+        sb = self.make(n_tasks=1, workers=2)  # publish defaults to git, local remote
+        # a real controller would hold GH_TOKEN; inject it into the controller env
+        env = sb.env()
+        env["GH_TOKEN"] = "sentinel-not-a-real-token"
+        logf = open(sb.tmp / "controller.log", "ab")
+        sb.proc = subprocess.Popen([sys.executable, "-m", "controller", "run", "--config", str(sb.config)],
+                                   cwd=ROOT, env=env, stdout=logf, stderr=subprocess.STDOUT)
+        logf.close()
+        # the task parks in 'waiting' with the fail-closed reason; the agent never runs
+        parked = sb.wait_for(lambda: (sb.tasks().get("T-0001") or {}).get("state") == "waiting"
+                             and "fail closed" in (sb.tasks()["T-0001"]["reason"] or ""), timeout=60)
+        self.assertTrue(parked, sb.tasks())
+        time.sleep(3)
+        self.assertEqual(sb.spy_calls(), [])  # no AI CLI was ever launched
+        self.assertIsNone(sb.remote_contract("T-0001"))  # nothing published
+        sb.stop()
+
+
 def _claim_all(db_path, worker_id, out):
     store = Store(db_path)
     got = []

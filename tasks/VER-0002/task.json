@@ -67,6 +67,44 @@
       "produced_by": "claude-code",
       "created_at": "2026-10-11T09:22:32Z",
       "criterion_ids": []
+    },
+    {
+      "id": "C20261011T092234Z",
+      "kind": "run_record",
+      "path": "runs/VER-0002/VER-0002-check-20261011T092234Z/run.json",
+      "sha256": "d4cbb2996e6ed0425de56def36f15dcc732fc97a489afc12b7358311b1f44e57",
+      "produced_by": "aiwos-runner",
+      "created_at": "2026-10-11T09:22:34Z",
+      "criterion_ids": [],
+      "summary": "check run: 2/2 passed"
+    },
+    {
+      "id": "C20261011T092234Z-AC1",
+      "kind": "command_output",
+      "path": "runs/VER-0002/VER-0002-check-20261011T092234Z/checks/AC1.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "produced_by": "aiwos-runner",
+      "created_at": "2026-10-11T09:22:34Z",
+      "criterion_ids": [
+        "AC1"
+      ],
+      "command": "grep -q done tasks/VER-0002/out.txt",
+      "exit_code": 0,
+      "summary": "exited, expected exit 0: PASS"
+    },
+    {
+      "id": "C20261011T092234Z-AC2",
+      "kind": "command_output",
+      "path": "runs/VER-0002/VER-0002-check-20261011T092234Z/checks/AC2.log",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "produced_by": "aiwos-runner",
+      "created_at": "2026-10-11T09:22:34Z",
+      "criterion_ids": [
+        "AC2"
+      ],
+      "command": "test -s tasks/VER-0002/out.txt",
+      "exit_code": 0,
+      "summary": "exited, expected exit 0: PASS"
     }
   ],
   "quality": {

@@ -1,0 +1,7 @@
+diff --git a/tasks/VER-0002/out.txt b/tasks/VER-0002/out.txt
+new file mode 100644
+index 0000000..19f86f4
+--- /dev/null
++++ b/tasks/VER-0002/out.txt
+@@ -0,0 +1 @@
++done

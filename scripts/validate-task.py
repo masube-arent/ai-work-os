@@ -20,10 +20,15 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_PATH = ROOT / "contracts" / "task.schema.json"
-RUN_SCHEMA_PATH = ROOT / "contracts" / "run.schema.json"
-PROFILES_DIR = ROOT / "profiles"
+# CODE_ROOT holds the rules (schemas, profiles) and is the checkout this script
+# runs from. ROOT holds the data (contracts, evidence) and defaults to the same
+# checkout; the v0.3 controller points AIWOS_ROOT at a task worktree so a task
+# branch can never supply the rules it is judged by.
+CODE_ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ["AIWOS_ROOT"]).resolve() if os.environ.get("AIWOS_ROOT") else CODE_ROOT
+SCHEMA_PATH = CODE_ROOT / "contracts" / "task.schema.json"
+RUN_SCHEMA_PATH = CODE_ROOT / "contracts" / "run.schema.json"
+PROFILES_DIR = CODE_ROOT / "profiles"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from scan_secrets import find_in_text  # noqa: E402

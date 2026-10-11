@@ -21,6 +21,11 @@ class GitError(RuntimeError):
     pass
 
 
+class Diverged(GitError):
+    """The local task branch and the remote one each have commits the other
+    lacks. Nothing is overwritten; a person decides."""
+
+
 def git(repo, *args, check=True, env=None, timeout=300, lock_retries=5):
     """Run git. Ten workers share one object store and ref namespace, so a
     command can lose a race for a ref or packed-refs lock; those failures are
@@ -42,6 +47,16 @@ def fetch(repo, remote):
 
 def ref_exists(repo, ref):
     return git(repo, "rev-parse", "--verify", "--quiet", ref + "^{commit}", check=False).returncode == 0
+
+
+def rev(repo, ref):
+    """Commit (or blob, for `ref:path`) id, or None if it does not exist."""
+    out = git(repo, "rev-parse", "--verify", "--quiet", ref, check=False)
+    return out.stdout.strip() if out.returncode == 0 else None
+
+
+def is_ancestor(repo, older, newer):
+    return git(repo, "merge-base", "--is-ancestor", older, newer, check=False).returncode == 0
 
 
 def list_contracts(repo, ref, globs):
@@ -72,12 +87,20 @@ def reset_worktree(path):
 
 
 def checkout_task_branch(repo, worktree, task_id, remote, base_branch):
-    """Put the task branch in this worktree: the local branch if it exists,
-    else the remote one, else a new branch from the remote base."""
+    """Put the task branch in this worktree, taking whichever of the local and
+    remote branch is newer. If GitHub is ahead (a person pushed a fix), the
+    local branch is fast-forwarded to it; if the local branch is ahead
+    (unpublished results), it is kept; if they have diverged, Diverged is
+    raised and nothing is changed."""
     branch = TASK_BRANCH.format(task_id)
-    if ref_exists(repo, f"refs/heads/{branch}"):
+    local, upstream = rev(repo, f"refs/heads/{branch}"), rev(repo, f"refs/remotes/{remote}/{branch}")
+    if local and upstream and local != upstream and not is_ancestor(repo, upstream, local):
+        if not is_ancestor(repo, local, upstream):
+            raise Diverged(f"{branch}: local {local[:12]} and {remote} {upstream[:12]} have diverged")
+        start = f"{remote}/{branch}"  # remote is ahead: fast-forward
+    elif local:
         start = branch
-    elif ref_exists(repo, f"refs/remotes/{remote}/{branch}"):
+    elif upstream:
         start = f"{remote}/{branch}"
     else:
         start = f"{remote}/{base_branch}"
@@ -130,9 +153,15 @@ def publish(repo, mode, remote, base_branch, task, title, body, env=None):
     if git(repo, "for-each-ref", f"refs/heads/run/{task_id}/", "--format=%(refname)"):
         refspecs.append(f"refs/heads/run/{task_id}/*:refs/heads/run/{task_id}/*")
     git(repo, "push", "--quiet", remote, *refspecs, env=env, timeout=600)
-    result = {"published": True, "branch": branch}
+    result = {"published": True, "branch": branch, "pushed_sha": rev(repo, f"refs/heads/{branch}")}
     if mode == "github":
-        result["pr"] = ensure_pull_request(repo, base_branch, branch, title, body, env)
+        # a failed PR after a successful push is recorded, not raised: the push
+        # stands, and the sync retries the PR alone (ensure_pull_request never
+        # creates a second one)
+        try:
+            result["pr"] = ensure_pull_request(repo, base_branch, branch, title, body, env)
+        except (GitError, OSError, subprocess.TimeoutExpired) as exc:
+            result["pr_error"] = str(exc)[:300]
     return result
 
 

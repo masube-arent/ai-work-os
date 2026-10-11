@@ -35,10 +35,16 @@ def prepare(cfg):
 
 # ------------------------------------------------------------------ sync
 
+def next_stage_at(repo, ref, path):
+    contract = gitops.read_json_at(repo, ref, path)
+    return contract, stages.next_stage(contract, lambda p: gitops.git(repo, "show", f"{ref}:{p}"))
+
+
 def sync(cfg, store):
-    """Enqueue contracts found on <remote>/<base>. A task branch on the remote,
-    if one exists, is newer than main and wins, which is also how the queue is
-    rebuilt after its database is lost."""
+    """Bring the queue in line with GitHub: enqueue new contracts from
+    <remote>/<base> and reconcile known tasks no worker holds. A task branch on
+    the remote is newer than main for that task, which is also how the queue
+    is rebuilt after its database is lost."""
     repo, remote = cfg["repo_dir"], cfg["remote"]
     base = f"{remote}/{cfg['base_branch']}"
     gitops.fetch(repo, remote)
@@ -54,42 +60,112 @@ def sync(cfg, store):
             store.event("sync_duplicate", task_id=task_id, detail={"path": path, "first": seen[task_id]})
             continue
         seen[task_id] = path
-        ref = base
-        branch_ref = f"{remote}/{gitops.TASK_BRANCH.format(task_id)}"
-        if gitops.ref_exists(repo, branch_ref):
-            try:
-                contract, ref = gitops.read_json_at(repo, branch_ref, path), branch_ref
-            except (ValueError, gitops.GitError):
-                pass
+        branch = gitops.TASK_BRANCH.format(task_id)
+        main_sha = gitops.rev(repo, f"{base}:{path}")
+        remote_sha = gitops.rev(repo, f"refs/remotes/{remote}/{branch}")
+        row = store.get(task_id)
+        if row is not None:
+            if row["state"] != "leased":
+                reconcile(cfg, store, row, path, main_sha, remote_sha)
+            continue
+        ref = f"{remote}/{branch}" if remote_sha else base
+        try:
+            contract, (stage, agent, state, reason) = next_stage_at(repo, ref, path)
+        except (ValueError, gitops.GitError):
+            ref = base
+            contract, (stage, agent, state, reason) = next_stage_at(repo, ref, path)
         if contract.get("status") == "draft":
             continue
-        reader = lambda p, r=ref: gitops.git(repo, "show", f"{r}:{p}")  # noqa: E731
-        stage, agent, state, reason = stages.next_stage(contract, reader)
-        if store.upsert_new(task_id, path, gitops.TASK_BRANCH.format(task_id), stage or "none", agent, state, reason):
+        if store.upsert_new(task_id, path, branch, stage or "none", agent, state, reason,
+                            main_sha=main_sha, remote_sha=remote_sha):
             added.append(task_id)
     store.event("synced", detail={"contracts": len(seen), "added": added})
     republish(cfg, store)
     return added
 
 
+def reconcile(cfg, store, row, path, main_sha, remote_sha):
+    """Take in what changed on GitHub for a task no worker holds. A change that
+    only adds to what the controller has (a person's commit on top of the task
+    branch, a new contract for a task not yet started) is taken in. A change
+    that would overwrite or contradict work already done is held for a person;
+    nothing is overwritten automatically."""
+    repo, remote = cfg["repo_dir"], cfg["remote"]
+    task_id = row["task_id"]
+    branch = gitops.TASK_BRANCH.format(task_id)
+    local = gitops.rev(repo, f"refs/heads/{branch}")
+    started = bool(local or remote_sha)
+
+    # 1. the contract on main
+    if row["main_sha"] is None:  # queue created before this field existed: record, do not act
+        store.resync(task_id, kind="sync_baseline", main_sha=main_sha)
+    elif main_sha != row["main_sha"]:
+        if not started:
+            _, (stage, agent, state, reason) = next_stage_at(repo, f"{remote}/{cfg['base_branch']}", path)
+            store.resync(task_id, kind="main_contract_taken_in", detail={"from": row["main_sha"], "to": main_sha},
+                         stage=stage or "none", agent=agent, state=state, reason=reason, main_sha=main_sha,
+                         attempts=0, not_before=None)
+        else:
+            store.resync(task_id, kind="main_contract_changed", detail={"from": row["main_sha"], "to": main_sha},
+                         state="held", main_sha=main_sha,
+                         reason="contract changed on main after work started; a person must decide "
+                                "(the task branch keeps the contract the work was done against)")
+        return
+
+    # 2. the task branch on the remote
+    if not remote_sha or remote_sha == row["remote_sha"]:
+        return
+    if local and local != remote_sha:
+        if gitops.is_ancestor(repo, remote_sha, local):
+            return  # we are ahead (unpublished results): republish pushes them
+        if not gitops.is_ancestor(repo, local, remote_sha):
+            store.resync(task_id, kind="task_branch_diverged", state="held", remote_sha=remote_sha,
+                         detail={"local": local, "remote": remote_sha},
+                         reason=f"diverged from GitHub: local {local[:12]} and {remote} {remote_sha[:12]} each "
+                                "have commits the other lacks; a person must reconcile (nothing was overwritten)")
+            return
+        # GitHub is ahead: fast-forward, and only if our branch is still where we saw it
+        gitops.git(repo, "update-ref", f"refs/heads/{branch}", remote_sha, local)
+    _, (stage, agent, state, reason) = next_stage_at(repo, f"refs/remotes/{remote}/{branch}", path)
+    store.resync(task_id, kind="task_branch_taken_in", detail={"from": row["remote_sha"], "to": remote_sha},
+                 stage=stage or "none", agent=agent, state=state, reason=reason, remote_sha=remote_sha,
+                 attempts=0, not_before=None)
+
+
 def republish(cfg, store):
-    """Retry pushes that failed: a task branch with commits the remote lacks.
-    Only for tasks no worker holds, so a push never races a stage."""
+    """Retry what a worker could not finish publishing, for tasks no worker
+    holds: a push that failed, or (publish=github) a pull request whose creation
+    failed after its push succeeded. ensure_pull_request looks for an open PR
+    first, so a retry never creates a second one."""
     if cfg["publish"] == "none":
         return
-    rows = store.db.execute("SELECT task_id, contract_path FROM tasks WHERE state != 'leased'").fetchall()
+    repo, remote = cfg["repo_dir"], cfg["remote"]
+    rows = store.db.execute("SELECT * FROM tasks WHERE state != 'leased'").fetchall()
     for row in rows:
-        if not gitops.unpublished(cfg["repo_dir"], cfg["remote"], row["task_id"]):
+        task_id = row["task_id"]
+        if (row["reason"] or "").startswith("diverged"):
             continue
-        branch = gitops.TASK_BRANCH.format(row["task_id"])
+        branch = gitops.TASK_BRANCH.format(task_id)
         try:
-            contract = gitops.read_json_at(cfg["repo_dir"], f"refs/heads/{branch}", row["contract_path"])
-            title, body = gitops.pr_text(row["task_id"], contract)
-            result = gitops.publish(cfg["repo_dir"], cfg["publish"], cfg["remote"], cfg["base_branch"],
-                                    {"task_id": row["task_id"]}, title, body)
-            store.event("republished", task_id=row["task_id"], detail=result)
+            if gitops.unpublished(repo, remote, task_id):
+                contract = gitops.read_json_at(repo, f"refs/heads/{branch}", row["contract_path"])
+                title, body = gitops.pr_text(task_id, contract)
+                result = gitops.publish(repo, cfg["publish"], remote, cfg["base_branch"], {"task_id": task_id},
+                                        title, body)
+            elif cfg["publish"] == "github" and not row["pr_url"] and gitops.ref_exists(
+                    repo, f"refs/remotes/{remote}/{branch}"):
+                contract = gitops.read_json_at(repo, f"refs/remotes/{remote}/{branch}", row["contract_path"])
+                title, body = gitops.pr_text(task_id, contract)
+                try:
+                    result = {"pr": gitops.ensure_pull_request(repo, cfg["base_branch"], branch, title, body)}
+                except (gitops.GitError, OSError, subprocess.TimeoutExpired) as exc:
+                    result = {"pr_error": str(exc)[:300]}
+            else:
+                continue
+            store.record_publish(task_id, result)
+            store.event("republished", task_id=task_id, detail=result)
         except Exception as exc:
-            store.event("republish_failed", task_id=row["task_id"], detail=str(exc)[:300])
+            store.event("republish_failed", task_id=task_id, detail=str(exc)[:300])
 
 
 def refresh_agents(cfg, store):
@@ -164,19 +240,36 @@ class Controller:
                 self.spawn(wid)
 
     def housekeeping(self):
-        for lease in self.store.dead_leases():
-            child = lease["lease_child"]
+        """Hand on leases whose owner died or stopped renewing, in this order:
+        stop the owner (it may be alive but frozen), stop its stage process,
+        confirm both are gone, detach the owner's worktree, and only then
+        return the task to the queue. A lease not confirmed this round is
+        left for the next one."""
+        confirmed = []
+        for lease in self.store.stale_leases():
+            owner, child = lease["lease_pid"], lease["lease_child"]
+            ours = pid_alive(owner) and "controller" in cmdline(owner) and "worker" in cmdline(owner)
+            if ours:
+                log.warning("worker %s (pid %s) stopped renewing its lease on %s; stopping it",
+                            lease["lease_owner"], owner, lease["task_id"])
+                kill_tree(owner, grace=self.cfg["kill_grace_s"])
+                self.store.event("stale_owner_stopped", worker=lease["lease_owner"], task_id=lease["task_id"],
+                                 detail={"pid": owner})
             if child and pid_alive(child):
                 log.warning("killing orphaned stage process %s of task %s", child, lease["task_id"])
                 kill_tree(child, grace=self.cfg["kill_grace_s"])
                 self.store.event("orphan_killed", task_id=lease["task_id"], detail={"pid": child})
+            if (ours and pid_alive(owner)) or (child and pid_alive(child)):
+                continue  # not confirmed gone: never hand the task on beside a running process
             worktree = Path(self.cfg["state_dir"]) / "worktrees" / f"w{lease['lease_owner']:02d}"
             if worktree.exists():
                 try:
                     gitops.reset_worktree(str(worktree))
                 except gitops.GitError as exc:
                     log.warning("could not reset %s: %s", worktree, exc)
-        self.store.reclaim(self.cfg["max_stage_attempts"])
+                    continue
+            confirmed.append((lease["task_id"], owner))
+        self.store.reclaim(self.cfg["max_stage_attempts"], confirmed)
 
     def run(self):
         signal.signal(signal.SIGTERM, self.on_signal)

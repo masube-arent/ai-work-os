@@ -282,8 +282,12 @@ class Store:
                     state, reason = "held", f"stage '{row['stage']}' leased {row['attempts']} times without finishing"
                 else:
                     state, reason = "queued", "lease reclaimed"
+                # a model stage whose process was started counts as an AI run even
+                # though its worker died before it could charge the run itself
+                charged = 1 if row["stage"] in MODEL_STAGES and row["lease_child"] else 0
                 db.execute("UPDATE tasks SET state=?, reason=?, lease_owner=NULL, lease_pid=NULL, lease_expires=NULL, "
-                           "lease_child=NULL, updated_at=? WHERE task_id=?", (state, reason, now, row["task_id"]))
+                           "lease_child=NULL, ai_runs=ai_runs+?, updated_at=? WHERE task_id=?",
+                           (state, reason, charged, now, row["task_id"]))
                 self.event("reclaimed", row["lease_owner"], row["task_id"], row["stage"],
                            {"to": state, "pid": row["lease_pid"]}, db=db)
                 reclaimed.append(row["task_id"])

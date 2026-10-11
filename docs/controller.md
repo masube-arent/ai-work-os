@@ -110,6 +110,14 @@ PR 作成だけが失敗した場合、同期のたびに PR 作成だけを再�
   ワーカー・段階のログはローカル（`state/logs`）に残り、push されない。
 - **OS レベルの隔離**: systemd ユニットで専用ユーザー・`ProtectSystem=strict`・`ProtectHome`・
   書き込み可能パスの限定・`NoNewPrivileges` を設定する。ワーカーごとの別ユーザーやコンテナ分離は未実装（下記）。
+- **【未解決】エージェントから認証情報が読める**（2026-10-11 実測）: 環境変数を除いても、エージェントは
+  controller・ワーカーと同じ OS ユーザーで動くため、祖先プロセスの `/proc/<pid>/environ`（`GH_TOKEN` を含む）や、
+  `HOME` 内の git・gh の認証情報ファイルを読める。Claude のワーカーは `python3 -m unittest` しか実行できないが、
+  自分で書いたテストファイルを実行できるため、任意の Python を実行できるのと同じである。
+  **このため `publish: github`（および push 用の認証情報を置いた `publish: git`）での無人運転は、エージェントを
+  別ユーザーで動かす隔離ができるまで安全とは言えない。** 運用するかどうかは人間の判断とする。
+  被害を小さくする設定: このリポジトリだけを対象にした fine-grained token（contents・pull requests の write のみ）、
+  main のブランチ保護（PR 必須・人間のレビュー必須・管理者も対象）。
 
 ## 配置手順（Ubuntu VPS）
 
@@ -163,12 +171,11 @@ sudo systemctl stop aiwos-controller    # 実行中の段階は中断され、�
 | 項目 | 方法 | 結果 |
 |---|---|---|
 | 10 ワーカー・20 タスク・二重実行なし・モデル同時実行 ≤ 2 | スタブ CLI（`tests/test_controller.py`） | 成功 |
-| ワーカー強制終了・controller 強制終了・正常停止からの回復 | スタブ CLI | 成功 |
-| 利用枠バックオフ・未ログイン時の保留と再開・AI 実行回数の上限 | スタブ CLI | 成功 |
-| main 以外の契約を取らない・タスクブランチのスクリプトを実行しない | スタブ CLI | 成功 |
-| PR 作成（1 タスク 1 件、merge/review を呼ばない） | 偽の `gh` | 成功（実際の GitHub API では未検証） |
+| 異常終了からの回復・バックオフ・保留・上限・信頼済みコード・GitHub 同期の各規則 | スタブ CLI（`tests/test_controller*.py`） | 成功 |
+| **実際の GitHub への push** | 実 Claude Code・実 GitHub・合成タスク 2 件（`tests/results/2026-10-11-v0.3-live-verification.md`） | **成功**（タスクブランチ・実行ブランチ。push された契約は検証器で valid） |
+| **実環境でのワーカー強制終了・controller 強制終了・正常再起動** | 同上 | **成功**（完了済みの worker 実行は各タスク 1 件のみ、再実行・重複なし） |
+| 実際の `gh pr create` | 同上 | **未検証**: この環境では GitHub GraphQL が遮断され（HTTP 403）、`gh pr list/create` が使えない。失敗は記録され、push と処理は止まらず、同期ごとに再試行されることは確認 |
 | systemd ユニット | `systemd-analyze verify` | 構文 OK。実際の systemd 下での起動は未検証（この環境の PID 1 は systemd ではない） |
-| 実 CLI での同時実行 | `tests/results/2026-10-11-v0.3-controller.md` | 記録を参照 |
 
 ## 未実装・残課題
 
@@ -181,4 +188,7 @@ sudo systemctl stop aiwos-controller    # 実行中の段階は中断され、�
   この状態は試験で再現できていない
 - held になったタスクを人が再開する手段は、タスクブランチへの push（または main の契約変更）。controller 側の
   held を解除するコマンドは無い
-- `gh pr create` は実際の GitHub では未実行（この環境の gh は未認証）
+- `gh pr create` は実際の GitHub では未実行（この環境では GraphQL が遮断される。VPS で検証する）
+- エージェントを別ユーザーで動かす隔離（上記「エージェントから認証情報が読める」の対策）
+- `run.json` の `models_reported` が示すとおり、モデルを指定しない実行では CLI の既定モデルが実行ごとに変わりうる
+  （実測: opus と sonnet）。性能比較をする場合はモデルの固定が必要

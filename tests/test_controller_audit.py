@@ -178,6 +178,28 @@ class LiveOwnerExpiredLease(Case):
         self.assertTrue(sb.events("stale_owner_stopped"))
 
 
+class ModelRunOfDeadWorkerIsCharged(unittest.TestCase):
+    """Found in the live run of 2026-10-11: a worker killed during a real Claude
+    run left ai_runs at 1 after three model runs, because only the worker's own
+    finish() charged the run. A reclaimed model stage whose stage process was
+    started must count against max_ai_runs_per_task."""
+
+    def test_reclaimed_model_stage_counts_as_an_ai_run(self):
+        dead = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead.wait()  # a pid that no longer runs: the "killed worker"
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(os.path.join(d, "q.db"))
+            store.init(2, 2)
+            store.upsert_new("T-1", "x", "b", "work", "claude-code", "queued")
+            store.upsert_new("T-2", "x", "b", "check", None, "queued")
+            for wid in (1, 2):
+                task = store.claim(wid, dead.pid, 60, {"claude-code"})
+                store.set_child(wid, dead.pid, task["task_id"], 999999)  # stage process was started
+            store.reclaim(3, [("T-1", dead.pid), ("T-2", dead.pid)])
+            self.assertEqual(store.get("T-1")["ai_runs"], 1)  # model stage: charged
+            self.assertEqual(store.get("T-2")["ai_runs"], 0)  # check runs no model
+
+
 class LeaseKeeperLimit(unittest.TestCase):
     def test_keeper_stops_renewing_after_the_longest_legitimate_stage(self):
         from controller.worker import LeaseKeeper

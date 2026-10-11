@@ -180,16 +180,13 @@ class FullCycle(Base):
         self.assertEqual(t["quality"]["completeness"]["judged_by"], "codex-cli")
         self.ok(sb.validate())
 
-        # AI cannot accept; a human can
-        r = sb.aiwos("transition", TASK, "--to", "accepted", "--by", "codex-cli")
-        self.assertNotEqual(r.returncode, 0)
-        self.ok(sb.aiwos("transition", TASK, "--to", "accepted", "--by", "human"))
+        # Final approval is never granted from the CLI (Security Fix 001); see HumanApprovalSpoofing.
 
         m = json.loads(self.ok(sb.aiwos("metrics", "--json")).stdout)
         row = m["worker_runs"][0]
         self.assertEqual((row["checks_passed"], row["checks_total"], row["defects"]), (2, 2, 0))
         self.assertEqual(row["models_reported"], ["stub-model"])
-        self.assertEqual(row["task_status_now"], "accepted")
+        self.assertEqual(row["task_status_now"], "passed")
 
     def test_tampered_evidence_is_detected(self):
         sb = self.sb
@@ -219,6 +216,55 @@ class FullCycle(Base):
         cwd = Path(sb.spy_calls()[0]["cwd"])
         self.assertFalse(str(cwd).startswith(str(sb.repo)))
         self.assertFalse((cwd / "runs").exists())
+
+
+def drive_to_passed(test):
+    sb = test.sb
+    for args in (("run", TASK, "--role", "worker", "--execute"), ("check", TASK, "--execute"),
+                 ("run", TASK, "--role", "reviewer", "--execute"), ("judge", TASK, "--write")):
+        test.ok(sb.aiwos(*args))
+    test.assertEqual(sb.task()["status"], "passed")
+
+
+class HumanApprovalSpoofing(Base):
+    """Security Fix 001: `--by human` is a claim, not an identity. Until an
+    authenticated approval channel exists, nothing reaches 'accepted'."""
+
+    def test_cli_claiming_human_cannot_accept(self):
+        sb = self.sb
+        drive_to_passed(self)
+        before = (sb.repo / TASK).read_bytes()
+        r = sb.aiwos("transition", TASK, "--to", "accepted", "--by", "human")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("cannot be verified", r.stderr)
+        self.assertEqual((sb.repo / TASK).read_bytes(), before)  # contract untouched
+
+    def test_cli_agent_cannot_accept(self):
+        sb = self.sb
+        drive_to_passed(self)
+        for actor in ("codex-cli", "claude-code", "aiwos-runner", "chatgpt"):
+            r = sb.aiwos("transition", TASK, "--to", "accepted", "--by", actor)
+            self.assertNotEqual(r.returncode, 0, actor)
+        self.assertEqual(sb.task()["status"], "passed")
+
+    def test_hand_edited_acceptance_fails_validation(self):
+        sb = self.sb
+        drive_to_passed(self)
+        t = sb.task()
+        t["status"] = "accepted"
+        t["history"].append({"from": "passed", "to": "accepted", "at": "2099-01-01T00:00:00Z", "by": "human",
+                             "note": "approved"})
+        (sb.repo / TASK).write_text(json.dumps(t, ensure_ascii=False))
+        r = sb.validate()
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("no verifiable human approval", r.stdout)
+
+    def test_cli_human_claim_on_other_transitions_is_marked_unverified(self):
+        sb = self.sb
+        self.ok(sb.aiwos("transition", TASK, "--to", "suspended", "--by", "human", "--reason", "pause"))
+        step = sb.task()["history"][-1]
+        self.assertEqual((step["to"], step["by"]), ("suspended", "human"))
+        self.assertIn("unverified", step["note"])
 
 
 class Rework(Base):

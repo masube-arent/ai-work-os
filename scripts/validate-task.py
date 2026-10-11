@@ -44,6 +44,11 @@ TRANSITIONS = {
 }
 DIMENSIONS = ("spec_conformance", "correctness", "completeness")
 HUMAN_ONLY_TARGETS = {"accepted"}
+# Security Fix 001: "human" in a contract is a label anyone can write. No
+# authenticated approval channel exists yet (docs/human-approval.md), so a
+# step that needs a verified human is refused rather than trusted.
+UNVERIFIABLE_HUMAN = ("'by: human' / 'produced_by: human' is a self-declared label; this version has no "
+                      "authenticated approval channel (docs/human-approval.md), so it is refused (fail closed)")
 # The executable a run record must name for each agent. An agent label alone
 # proves nothing; the record of what actually ran is what is checked.
 CLI_OF_AGENT = {"claude-code": "claude", "codex-cli": "codex"}
@@ -211,8 +216,7 @@ def independence_errors(task):
     errors = []
     reviewer, worker = task["reviewer"], task["assigned_agent"]
     if reviewer == "human":
-        if not any(ev["kind"] == "review_note" and ev["produced_by"] == "human" for ev in task["evidence"]):
-            errors.append("reviewer is 'human' but no review_note produced_by 'human' is recorded")
+        errors.append(f"human review cannot be verified: {UNVERIFIABLE_HUMAN}")
         return errors
 
     from jsonschema import Draft202012Validator
@@ -284,6 +288,8 @@ def history_errors(task):
             errors.append(f"history[{i}]: transition {src} -> {dst} is not allowed")
         if dst in HUMAN_ONLY_TARGETS and step["by"] != "human":
             errors.append(f"history[{i}]: only a human may move a task to '{dst}' (by '{step['by']}')")
+        elif dst in HUMAN_ONLY_TARGETS:
+            errors.append(f"history[{i}]: no verifiable human approval for '{dst}': {UNVERIFIABLE_HUMAN}")
         if dst == "suspended":
             before_suspend = src
         if src == "suspended" and dst != "cancelled" and dst != before_suspend:

@@ -756,9 +756,15 @@ def cmd_judge(args):
 
 def cmd_transition(args):
     path, task, task_sha = load_valid(args.task)
+    if args.to in vt.HUMAN_ONLY_TARGETS:
+        # Security Fix 001: whoever runs this CLI can type `--by human`. Final
+        # approval waits for an authenticated channel; until then it is refused.
+        raise Refused(f"'{args.to}' needs a verified human approval, and the caller of this CLI cannot be "
+                      "verified (fail closed). See docs/human-approval.md")
     previous = task["status"]
-    task["history"].append({"from": previous, "to": args.to, "at": now(), "by": args.by,
-                            "note": args.reason or "manual transition"})
+    # The actor is whatever the caller typed; the record says so.
+    note = f"{args.reason or 'manual transition'} [actor '{args.by}' declared on the CLI, unverified]"
+    task["history"].append({"from": previous, "to": args.to, "at": now(), "by": args.by, "note": note})
     task["status"] = args.to
     if args.to == "escalated":
         task["escalation_reason"] = args.reason
@@ -784,7 +790,7 @@ def cmd_status(args):
         print(f"  run {r['run_id']:<40} {r['role']:<8} {r['agent']:<12} {r['status']:<18} "
               f"{(r['result_commit'] or r['target_commit'] or '')[:12]}")
     nxt = {"ready": "run --role worker", "rework": "run --role worker", "in_progress": "run --role worker (restart)",
-           "review": "check, then run --role reviewer, then judge", "passed": "human: transition --to accepted --by human",
+           "review": "check, then run --role reviewer, then judge", "passed": "final approval by a verified human (not implemented; docs/human-approval.md)",
            "escalated": "human decision (transition --to ready or cancelled)",
            "suspended": "transition back to the state before suspension"}.get(task["status"], "none")
     print(f"next: {nxt}")

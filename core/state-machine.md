@@ -14,7 +14,7 @@
 | review | 作業完了の申告後、レビュアーが検証中 |
 | rework | レビューで不合格。再作業待ち（`retry_count` を1増やす） |
 | passed | 3つの品質軸がすべて証拠付きで PASS |
-| accepted | 人間が最終承認した（終端） |
+| accepted | 本人確認された人間が最終承認した（終端）。本人確認が未実装のため現在は到達できない |
 | escalated | 人間の判断が必要（`escalation_reason` 必須） |
 | suspended | 中断中。再開時は中断前の状態に戻る |
 | cancelled | 取り消し（終端） |
@@ -41,7 +41,9 @@
 3. `rework` への遷移回数は `retry_count` と一致し、`retry_count ≤ max_retries ≤ 3`。
    上限に達したら `rework` ではなく `escalated` にする。
 4. `suspended` からの再開は、中断直前の状態へ戻る（または `cancelled`）。
-5. `accepted` へ遷移できるのは `human` だけ。
+5. `accepted` へ遷移できるのは本人確認された人間だけ。本人確認の仕組みは未実装のため、
+   **現在 `accepted` への遷移はすべて拒否される**（フェイルクローズ。`by: "human"` という文字列は証明にならない。
+   `docs/human-approval.md`）。
 6. 時刻はタイムゾーン付き ISO 8601 で、逆行しない。
 
 ## 中断と再開

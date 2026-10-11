@@ -11,7 +11,7 @@
 | 実装（既定） | `claude-code` | `codex-cli` |
 | 担当入替の比較（例: DEV-0002） | `codex-cli` | `claude-code` |
 | 要件・受入基準の作成（draft → ready） | `chatgpt` または人間 | `human` |
-| 最終承認（passed → accepted） | — | `human` |
+| 最終承認（passed → accepted） | — | 本人確認された人間（未実装のため現在は不可） |
 
 ## 指定できる担当
 
@@ -20,7 +20,7 @@
 | `claude-code` | Claude Code CLI | 可（`agents/claude.md`） |
 | `codex-cli` | Codex CLI | 可（ログイン後。`agents/codex.md`） |
 | `chatgpt` | ChatGPT（通常チャット） | 不可。自動接続なし。人間が brief を渡し、結果を記録する |
-| `human` | 人間 | 不可。`review_note`（produced_by: human）で記録する |
+| `human` | 人間 | 不可。`produced_by: human` は自己申告で検証できないため、人間レビューでの `passed` は現在不可 |
 | `aiwos-runner` | ランナー自身 | 担当にはなれない。機械的な手順（check、状態遷移）の実行者としてのみ記録される |
 
 ## 独立性

@@ -174,11 +174,10 @@ class ValidTasks(unittest.TestCase):
         ]
         self.assertValid(t)
 
-    def test_human_acceptance(self):
-        t = passed_task()
-        t["status"] = "accepted"
-        t["history"].append({"from": "passed", "to": "accepted", "at": "2026-10-10T02:00:00Z", "by": "human"})
-        self.assertValid(t)
+    def test_existing_example_states_still_valid(self):
+        for rel in ("examples/development/task.json", "examples/development/task-swap.json",
+                    "examples/document-compare/task.json"):
+            self.assertValid(load(rel))
 
 
 class InvalidTasks(unittest.TestCase):
@@ -315,7 +314,21 @@ class InvalidTasks(unittest.TestCase):
     def test_human_reviewer_needs_human_note(self):
         t = passed_task()
         t["reviewer"] = "human"
-        self.assertRejected(t, r"no review_note produced_by 'human'")
+        self.assertRejected(t, r"human review")
+
+    # --- Security Fix 001: a 'human' label is not an identity ---
+    def test_acceptance_claimed_by_human_is_rejected(self):
+        t = passed_task()
+        t["status"] = "accepted"
+        t["history"].append({"from": "passed", "to": "accepted", "at": "2026-10-10T02:00:00Z", "by": "human"})
+        self.assertRejected(t, r"no verifiable human approval")
+
+    def test_human_review_note_does_not_prove_a_human_review(self):
+        t = passed_task()
+        t["reviewer"] = "human"
+        t["evidence"].append({"id": "H1", "kind": "review_note", "produced_by": "human",
+                              "created_at": "2026-10-10T01:00:00Z", "criterion_ids": ["AC3"], "summary": "LGTM"})
+        self.assertRejected(t, r"human review cannot be verified")
 
     def test_passed_with_unverified_dimension(self):
         t = passed_task()

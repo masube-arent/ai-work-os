@@ -1,0 +1,74 @@
+{
+  "run_schema_version": "0.2",
+  "run_id": "VER-0001-worker-20261011T092232Z",
+  "task_id": "VER-0001",
+  "task_path": "tasks/VER-0001/task.json",
+  "task_type": "development",
+  "role": "worker",
+  "agent": "claude-code",
+  "status": "completed",
+  "stop_reason": null,
+  "cli": {
+    "name": "claude",
+    "path": "/opt/node22/bin/claude",
+    "version": "2.1.296 (Claude Code)"
+  },
+  "auth": {
+    "checked": true,
+    "logged_in": true,
+    "method": "oauth_token",
+    "provider": "firstParty"
+  },
+  "argv": [
+    "/opt/node22/bin/claude",
+    "-p",
+    "--output-format",
+    "json",
+    "--no-session-persistence",
+    "--strict-mcp-config",
+    "--disallowedTools",
+    "Bash(git push:*),Bash(git remote:*),Bash(curl:*),Bash(wget:*),WebFetch,WebSearch",
+    "--permission-mode",
+    "acceptEdits",
+    "--tools",
+    "Read,Edit,Write,Glob,Grep,Bash",
+    "--allowedTools",
+    "Bash(python3 -m unittest:*)"
+  ],
+  "model_requested": null,
+  "models_reported": [
+    {
+      "model": "claude-opus-5-5",
+      "input_tokens": 10,
+      "output_tokens": 1626
+    }
+  ],
+  "session_id_reported": "7e4bf356-1c52-44f4-a67d-c1c9a866d26c",
+  "cost_usd_reported": 0.12018759999999999,
+  "num_turns_reported": 8,
+  "base_commit": "fccbe7991c7f3635c00bec64d4a73369cf62c866",
+  "target_commit": null,
+  "result_commit": "8b7072ecf8e194a893d8b1028dfe8a64d72dbb95",
+  "branch": "run/VER-0001/VER-0001-worker-20261011T092232Z",
+  "task_sha256_at_start": "269338d34ea8a35df8dbc9c441af8ccee8f23d4421f2b307d8962740895b45ca",
+  "retry_count_at_start": 0,
+  "started_at": "2026-10-11T09:22:32Z",
+  "ended_at": "2026-10-11T09:22:52Z",
+  "duration_s": 19.3,
+  "exit_code": 0,
+  "timeout_s": 600,
+  "changed_files": [
+    "tasks/VER-0001/out.txt"
+  ],
+  "files": {
+    "prompt.md": "0e5e54031abcbbc628a39250ba67f2b6f2da43c51dbdeada9ead5ea22c458ce6",
+    "agent-stdout.json": "bd31caf81c3fd21f992dc8bfce085978d91c043e4adfd9ade2e9e67ea63e5021",
+    "agent-stderr.txt": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "patch.diff": "12a5ac7ca21fec808f88388895f9e6781541982c52b926c8c44a673c477f961a"
+  },
+  "security": {
+    "secret_hits": [],
+    "out_of_scope_paths": [],
+    "workspace_modified_by_reviewer": null
+  }
+}

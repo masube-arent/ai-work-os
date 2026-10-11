@@ -47,8 +47,28 @@
   ],
   "assigned_agent": "claude-code",
   "reviewer": "codex-cli",
-  "status": "ready",
-  "evidence": [],
+  "status": "review",
+  "evidence": [
+    {
+      "id": "W20261011T092232Z",
+      "kind": "run_record",
+      "path": "runs/VER-0001/VER-0001-worker-20261011T092232Z/run.json",
+      "sha256": "2690b893b00ddf0d73b8fd9dba0b90d77e29211fff7b4e256908d1cba7f2a15f",
+      "produced_by": "aiwos-runner",
+      "created_at": "2026-10-11T09:22:52Z",
+      "criterion_ids": [],
+      "summary": "worker run by claude-code: completed"
+    },
+    {
+      "id": "W20261011T092232Z-diff",
+      "kind": "diff",
+      "path": "runs/VER-0001/VER-0001-worker-20261011T092232Z/patch.diff",
+      "sha256": "12a5ac7ca21fec808f88388895f9e6781541982c52b926c8c44a673c477f961a",
+      "produced_by": "claude-code",
+      "created_at": "2026-10-11T09:22:52Z",
+      "criterion_ids": []
+    }
+  ],
   "quality": {
     "spec_conformance": {
       "verdict": "UNVERIFIED",
@@ -76,6 +96,20 @@
       "at": "2026-10-11T06:00:00Z",
       "by": "claude-code",
       "note": "synthetic task for live controller verification, written by Claude Code"
+    },
+    {
+      "from": "ready",
+      "to": "in_progress",
+      "at": "2026-10-11T09:22:32Z",
+      "by": "aiwos-runner",
+      "note": "worker run VER-0001-worker-20261011T092232Z started"
+    },
+    {
+      "from": "in_progress",
+      "to": "review",
+      "at": "2026-10-11T09:22:52Z",
+      "by": "aiwos-runner",
+      "note": "worker run VER-0001-worker-20261011T092232Z completed; result 8b7072ecf8e1"
     }
   ]
 }

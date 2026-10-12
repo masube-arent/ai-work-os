@@ -47,7 +47,7 @@ GitHub をタスク・コード・PR・品質証拠の正本とし、AI の実�
 3. **実行**: ワーカーは自分の worktree にタスクブランチを出し、信頼済みの `scripts/aiwos.py` を 1 回だけ実行する。
    実行中は `heartbeat_s` ごとにリースを更新する。
 4. **記録**: `runs/` と契約をコミットし、タスクブランチと実行ブランチを push する。
-   `publish=github` のときは、PR が無ければ `gh pr create` で作る。
+   `publish=github` のときは、PR が無ければ `gh api`（REST API）で作る（GraphQL は使わない）。
 5. **次の段階**を契約から決めてキューに戻す。`passed`・`escalated`・人間による中断は **held**（人間待ち）。
 
 | 契約の状態 | 次の段階 | 備考 |
@@ -109,7 +109,8 @@ PR 作成だけが失敗した場合、同期のたびに PR 作成だけを再�
 - **公開リポジトリ**: コミットされるのは v0.2 のランナーが秘密情報を検査した `runs/` だけ。
   ワーカー・段階のログはローカル（`state/logs`）に残り、push されない。
 - **OS レベルの隔離**: systemd ユニットで専用ユーザー・`ProtectSystem=strict`・`ProtectHome`・
-  書き込み可能パスの限定・`NoNewPrivileges` を設定する。ワーカーごとの別ユーザーやコンテナ分離は未実装（下記）。
+  書き込み可能パスの限定を設定する（`NoNewPrivileges` は controller が agent user へ sudo するため off。
+  隔離は OS レベルのユーザー分離で行う。下記「AI 実行ユーザーの OS レベル分離」）。
 - **AI 実行ユーザーの OS レベル分離（Security Fix 002）**: 信頼済みの controller・ワーカー・GitHub publisher は
   `agent_user`（例 aiwos-ctl）で動き、AI の CLI と AI が書いたコード・テスト・シェルコマンドはすべて非特権の
   `agent_user`（例 aiwos-agent）で動く。両者は workspace 用の `agent_group` だけを共有する。
@@ -156,7 +157,7 @@ sudo apt-get install -y python3-jsonschema git    # または pip install -r req
 # 3. 設定と認証情報（トークンは publish=github のときだけ）
 sudo cp /opt/aiwos/code/config/controller.example.json /etc/aiwos/controller.json
 sudo install -m 0600 /dev/null /etc/aiwos/controller.env   # GH_TOKEN=... を書く
-#    push に使う git の認証情報は aiwos ユーザーの credential helper 等で設定する
+#    push に使う git の認証情報は aiwos-ctl ユーザーの credential helper 等で設定する（agent user からは読めない配置にする）
 
 # 4. エージェントのログイン（AI 実行ユーザー aiwos-agent で。API キーは使わない）
 sudo -u aiwos-agent -H claude auth login          # サブスクリプションでログイン
@@ -176,9 +177,9 @@ sudo systemctl daemon-reload && sudo systemctl enable --now aiwos-controller
 ## 運用
 
 ```bash
-sudo -u aiwos python3 -m controller status --config /etc/aiwos/controller.json        # 10 ワーカー・枠・agent・タスク
-sudo -u aiwos python3 -m controller status --config /etc/aiwos/controller.json --json
-sudo -u aiwos python3 -m controller sync-once --config /etc/aiwos/controller.json     # ワーカーなしで同期だけ
+sudo -u aiwos-ctl python3 -m controller status --config /etc/aiwos/controller.json        # 10 ワーカー・枠・agent・タスク
+sudo -u aiwos-ctl python3 -m controller status --config /etc/aiwos/controller.json --json
+sudo -u aiwos-ctl python3 -m controller sync-once --config /etc/aiwos/controller.json     # ワーカーなしで同期だけ
 journalctl -u aiwos-controller -f
 sudo systemctl stop aiwos-controller    # 実行中の段階は中断され、次回起動時にやり直す
 ```
@@ -197,12 +198,15 @@ sudo systemctl stop aiwos-controller    # 実行中の段階は中断され、�
 | 異常終了からの回復・バックオフ・保留・上限・信頼済みコード・GitHub 同期の各規則 | スタブ CLI（`tests/test_controller*.py`） | 成功 |
 | **実際の GitHub への push** | 実 Claude Code・実 GitHub・合成タスク 2 件（`tests/results/2026-10-11-v0.3-live-verification.md`） | **成功**（タスクブランチ・実行ブランチ。push された契約は検証器で valid） |
 | **実環境でのワーカー強制終了・controller 強制終了・正常再起動** | 同上 | **成功**（完了済みの worker 実行は各タスク 1 件のみ、再実行・重複なし） |
-| 実際の `gh pr create` | 同上 | **未検証**: この環境では GitHub GraphQL が遮断され（HTTP 403）、`gh pr list/create` が使えない。失敗は記録され、push と処理は止まらず、同期ごとに再試行されることは確認 |
+| REST API での PR 作成・重複防止・失敗後の再試行 | 偽の `gh api`（`tests/_fake_gh.py`、`tests/test_isolation.py`） | 成功（作成 1 回・GET による重複防止・POST 失敗後の再試行を確認） |
+| 隔離未確認での PR 作成の拒否 | スタブ（`tests/test_isolation.py`） | 成功（`gh` を一度も呼ばない） |
+| 実際の GitHub への PR 作成（実 `gh api`） | — | **未検証**: この環境では GitHub API が遮断されるため実呼び出しは未確認（方式は REST に統一済み。GraphQL 非依存） |
 | systemd ユニット | `systemd-analyze verify` | 構文 OK。実際の systemd 下での起動は未検証（この環境の PID 1 は systemd ではない） |
 
 ## 未実装・残課題
 
-- ワーカーごとの OS ユーザー分離・コンテナ・ネットワーク制限（現状は全ワーカーが同じ aiwos ユーザー）
+- 信頼済み（aiwos-ctl）と AI 実行（aiwos-agent）の OS ユーザー分離は実装済み。未実装なのは、ワーカーごとに
+  AI を別ユーザーに分けること（現状は全ワーカーの AI が同じ aiwos-agent を共有）、コンテナ分離、ネットワーク制限
 - 利用枠の検出は出力の文言によるヒューリスティック。CLI が別の文言を出すと検出できない
   （その場合も実行は失敗として記録され、契約はエスカレーションされる）
 - ワーカー実行の失敗（usage limit を含む）でランナーが契約を `escalated` にした場合、自動では再開しない（人間待ち）
@@ -211,7 +215,6 @@ sudo systemctl stop aiwos-controller    # 実行中の段階は中断され、�
   この状態は試験で再現できていない
 - held になったタスクを人が再開する手段は、タスクブランチへの push（または main の契約変更）。controller 側の
   held を解除するコマンドは無い
-- `gh pr create` は実際の GitHub では未実行（この環境では GraphQL が遮断される。VPS で検証する）
-- エージェントを別ユーザーで動かす隔離（上記「エージェントから認証情報が読める」の対策）
+- 実 GitHub への `gh api` による PR 作成は未実行（この環境は GitHub API 遮断。方式は REST。VPS で検証する）
 - `run.json` の `models_reported` が示すとおり、モデルを指定しない実行では CLI の既定モデルが実行ごとに変わりうる
   （実測: opus と sonnet）。性能比較をする場合はモデルの固定が必要

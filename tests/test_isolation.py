@@ -427,5 +427,175 @@ class Gates(unittest.TestCase):
         self.assertIn("stale", why)
 
 
+def _install_fake_gh(bindir, state):
+    """Put the fake gh (tests/_fake_gh.py) on PATH as `gh`, using `state` for its
+    call log and created-PR records. Returns a PATH-prepended env dict."""
+    import stat as _stat
+    Path(bindir).mkdir(parents=True, exist_ok=True)
+    gh = Path(bindir) / "gh"
+    src = (Path(__file__).resolve().parent / "_fake_gh.py").read_text()
+    gh.write_text(src)
+    gh.chmod(gh.stat().st_mode | _stat.S_IEXEC | _stat.S_IXGRP | _stat.S_IXOTH)
+    return {**os.environ, "PATH": f"{bindir}:{os.environ['PATH']}", "FAKE_GH_STATE": str(state)}
+
+
+def _gh_calls(state):
+    p = Path(state) / "calls.jsonl"
+    return [json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+
+
+class RestPullRequestGitops(unittest.TestCase):
+    """Item 1: ensure_pull_request over `gh api` (REST) — creation, dedup, and
+    failure — with a fake gh. No GraphQL, no network, no isolation needed."""
+
+    def setUp(self):
+        import tempfile
+        self.d = Path(tempfile.mkdtemp(prefix="aiwos-pr-"))
+        self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
+        self.repo = self.d / "repo"
+        self.repo.mkdir()
+        from controller_harness import git
+        git(self.repo, "init", "-q")
+        self.state = self.d / "ghstate"
+        self.env = _install_fake_gh(self.d / "bin", self.state)
+
+    def make_pr(self):
+        return gitops.ensure_pull_request(self.repo, "main", "aiwos/task/T-0001", "title", "body",
+                                          env={"FAKE_GH_STATE": str(self.state),
+                                               "PATH": self.env["PATH"]}, github_repo="example/repo")
+
+    def test_creates_one_pr_when_none_exists(self):
+        url = self.make_pr()
+        self.assertTrue(url.startswith("https://github.com/example/repo/pull/"))
+        methods = [c[c.index("-X") + 1] for c in _gh_calls(self.state) if "api" in c[:1]]
+        self.assertEqual(methods, ["GET", "POST"])  # looked first, then created
+
+    def test_does_not_create_a_second_pr(self):
+        first = self.make_pr()
+        second = self.make_pr()  # a PR already exists for this branch
+        self.assertEqual(first, second)
+        posts = [c for c in _gh_calls(self.state) if c[:3] == ["api", "-X", "POST"]]
+        self.assertEqual(len(posts), 1)  # exactly one creation, ever
+
+    def test_post_failure_raises(self):
+        (self.state).mkdir(parents=True, exist_ok=True)
+        (self.state / "fail_post").write_text("")
+        with self.assertRaises(gitops.GitError):
+            self.make_pr()
+
+
+class RestPullRequestRetry(unittest.TestCase):
+    """Item 1: a push that succeeded with a failed PR creation is retried by the
+    sync (controller.main.republish) and ends with exactly one PR; a later sync
+    does not create a second. Driven directly (no running controller) with the
+    isolation verdict marked ok, so it needs no agent users."""
+
+    def setUp(self):
+        import tempfile
+        self.d = Path(tempfile.mkdtemp(prefix="aiwos-prretry-"))
+        self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
+        from controller_harness import git, contract
+        self.git = git
+        self.bare = self.d / "remote.git"
+        git(self.d, "init", "-q", "--bare", "-b", "main", str(self.bare))
+        self.repo = self.d / "repo"
+        git(self.d, "clone", "-q", str(self.bare), str(self.repo))
+        git(self.repo, "config", "user.name", "t")
+        git(self.repo, "config", "user.email", "t@t")
+        (self.repo / "tasks" / "T-0001").mkdir(parents=True)
+        (self.repo / "tasks" / "T-0001" / "task.json").write_text(
+            json.dumps(contract("T-0001"), ensure_ascii=False, indent=2))
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "seed")
+        git(self.repo, "push", "-q", "origin", "main")
+        # a task branch already pushed to the remote (the worker's push succeeded)
+        git(self.repo, "branch", "aiwos/task/T-0001", "main")
+        git(self.repo, "push", "-q", "origin", "aiwos/task/T-0001")
+        git(self.repo, "fetch", "-q", "origin")
+
+        self.store = Store(str(self.d / "q.db"))
+        self.store.init(1, 1)
+        self.store.upsert_new("T-0001", "tasks/T-0001/task.json", "aiwos/task/T-0001", "none", None, "held")
+        self.store.set_meta(publishing.ISOLATION_KEY, {"ok": True, "reason": None})  # pretend verified
+        self.state = self.d / "ghstate"
+        self.env = _install_fake_gh(self.d / "bin", self.state)
+        self.cfg = {"publish": "github", "github_repo": "example/repo", "repo_dir": str(self.repo),
+                    "remote": "origin", "base_branch": "main", "code_dir": str(ROOT),
+                    "isolation_check_ttl_s": 600, "credential_files": []}
+
+    def republish(self):
+        from controller import main as ctl
+        saved = dict(os.environ)
+        os.environ.update(self.env)
+        try:
+            ctl.republish(self.cfg, self.store)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def posts(self):
+        return [c for c in _gh_calls(self.state) if c[:3] == ["api", "-X", "POST"]]
+
+    def test_pr_failure_is_retried_then_deduped(self):
+        (self.state).mkdir(parents=True, exist_ok=True)
+        (self.state / "fail_post").write_text("")  # PR creation fails this round
+        self.republish()
+        self.assertIsNone(self.store.get("T-0001")["pr_url"])
+        self.assertTrue(self.store.get("T-0001")["pr_error"])
+        self.assertEqual(len(self.posts()), 1)  # it tried
+
+        (self.state / "fail_post").unlink()  # GitHub recovers
+        self.republish()
+        row = self.store.get("T-0001")
+        self.assertTrue((row["pr_url"] or "").startswith("https://github.com/example/repo/pull/"))
+        self.assertEqual(len(self.posts()), 2)  # one more attempt, which succeeded
+
+        self.republish()  # a later sync must not create another PR
+        self.assertEqual(len(self.posts()), 2)
+
+
+class RestPullRequestNotCalledWithoutIsolation(unittest.TestCase):
+    """Item 2: without a verified isolation boundary, publish=github never
+    reaches `gh` at all — the fail-closed gate stops before any REST call."""
+
+    def setUp(self):
+        import tempfile
+        self.d = Path(tempfile.mkdtemp(prefix="aiwos-noniso-"))
+        self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
+        from controller_harness import git, contract
+        self.repo = self.d / "repo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q")
+        git(self.repo, "remote", "add", "origin", "https://github.com/example/repo.git")
+        (self.repo / "tasks" / "T-0001").mkdir(parents=True)
+        (self.repo / "tasks" / "T-0001" / "task.json").write_text(json.dumps(contract("T-0001")))
+        git(self.repo, "add", "-A")
+        git(self.repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed")
+        git(self.repo, "branch", "aiwos/task/T-0001")
+        self.store = Store(str(self.d / "q.db"))
+        self.store.init(1, 1)
+        self.store.upsert_new("T-0001", "tasks/T-0001/task.json", "aiwos/task/T-0001", "none", None, "held")
+        # isolation NOT marked ok
+        self.state = self.d / "ghstate"
+        self.env = _install_fake_gh(self.d / "bin", self.state)
+        self.cfg = {"publish": "github", "github_repo": "example/repo", "repo_dir": str(self.repo),
+                    "remote": "origin", "base_branch": "main", "code_dir": str(ROOT),
+                    "isolation_check_ttl_s": 600, "credential_files": []}
+
+    def test_publish_allowed_is_false_and_gh_is_never_run(self):
+        allowed, why = publishing.publish_allowed(self.cfg, self.store)
+        self.assertFalse(allowed)
+        self.assertIn("fail closed", why)
+        from controller import main as ctl
+        saved = dict(os.environ)
+        os.environ.update(self.env)
+        try:
+            ctl.republish(self.cfg, self.store)  # must return without calling gh
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(_gh_calls(self.state), [])  # REST API never invoked
+
+
 if __name__ == "__main__":
     unittest.main()

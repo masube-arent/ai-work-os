@@ -116,7 +116,7 @@ class RetryLimitIntegration(Case):
 
 # ---------------------------------------------------------------- 2. PR retry
 
-@unittest.skip("moved to tests/test_isolation.py: publish=github now requires verified isolation (Security Fix 002)")
+@unittest.skip("replaced by tests/test_isolation.py RestPullRequest{Gitops,Retry,NotCalledWithoutIsolation}: REST (gh api) create/dedup/retry and the fail-closed gate")
 class PullRequestRetry(Case):
     def test_pr_creation_failed_after_push_is_retried_once_it_can_succeed(self):
         sb = self.make(n_tasks=1, workers=2, config={"publish": "github"})

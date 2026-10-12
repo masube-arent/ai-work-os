@@ -123,6 +123,15 @@ python3 -m controller status       --config /etc/aiwos/controller.json
 
 構成・制御条件・配置手順・残課題は [docs/controller.md](docs/controller.md)。
 
+手元の Windows PC では、PowerShell から WSL2 Ubuntu 内の Controller を操作するローカル CLI を使う
+（publish=none、OS 隔離を確認できなければ AI を起動しない。実機の Windows / WSL2 では未検証）:
+
+```powershell
+.\deploy\windows\aiwos.ps1 doctor | start | status | stop | sync
+```
+
+手順・ZIP の監査結果・未検証事項は [docs/local-cli.md](docs/local-cli.md)。
+
 ### 7. コミット前の品質ゲート
 
 ```bash

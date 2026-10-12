@@ -7,7 +7,10 @@ execution_allowed — may an untrusted stage (an AI CLI, or a command an AI
   agent runs as, running the AI would expose it (env vars are scrubbed, but a
   same-user process still reads /proc and credential files), so AI is run only
   when isolation is verified OR no credential is present at all. A stub test
-  carrying no credential keeps running without isolation.
+  carrying no credential keeps running without isolation. With
+  require_isolation (the local CLI's setting) only a verified isolation will do.
+  Under WSL the isolation also needs Windows interop and drive mounts off
+  (controller/wsl.py).
 
 publish_allowed — may results be pushed?
   - publish=none                      never
@@ -21,7 +24,7 @@ import os
 import time
 from pathlib import Path
 
-from . import gitops
+from . import gitops, wsl
 
 ISOLATION_KEY = "isolation"
 # A GitHub credential in the controller/worker environment that a same-user
@@ -55,6 +58,8 @@ def execution_allowed(cfg, store):
     ok, why = isolation_verified(cfg, store)
     if ok:
         return True, why
+    if cfg.get("require_isolation"):
+        return False, f"AI execution disabled (fail closed): require_isolation is set and {why}"
     exposed, what = credentials_exposed(cfg)
     if not exposed:
         return True, "no credentials present; AI may run unisolated"
@@ -104,6 +109,10 @@ def check_isolation(cfg, store):
         ok, reason = False, f"fs.protected_hardlinks is {hardlinks}, must be 1"
     if ok and missing:
         ok, reason = False, f"configured credential_files missing (cannot prove they are protected): {missing}"
+    if ok and wsl.is_wsl():
+        holes = wsl.problems()
+        if holes:
+            ok, reason = False, "WSL: " + "; ".join(holes)
     verdict = {"ok": ok, "reason": reason, "uid": report.get("uid"), "allowed": report.get("allowed", []),
                "results": report.get("results", {})}
     store.set_meta(ISOLATION_KEY, verdict)

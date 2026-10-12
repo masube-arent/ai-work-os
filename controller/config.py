@@ -34,6 +34,7 @@ DEFAULTS = {
     "agent_python": "/usr/bin/python3",  # interpreter named in the sudoers rule
     "credential_files": [],           # files the agent user must not be able to read (token env file, gh/git config)
     "isolation_check_ttl_s": 600,     # a passed isolation probe is trusted this long
+    "require_isolation": False,       # true: no AI at all until the probe passes, even with no credential present (local CLI)
     "github_repo": None,              # owner/name, for the REST API (publish=github)
     "extra_path": [],                 # prepended to PATH for agents (e.g. where codex is installed)
 }

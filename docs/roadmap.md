@@ -42,7 +42,18 @@ VPS・常駐プロセスを持たずに、クラウド上の AI 機能だけで�
 
 - Claude Code Cloud セッション: Issue ごとに 1 セッションで実装し、`bash scripts/check.sh` を通して Draft PR を出す
 - Claude Code Routine: 定期的に Issue を確認し、未処理タスクを 1 件ずつ実行する
-- Codex Cloud: PR へのコメント `@codex review` による独立レビュー
+
+### 役割
+
+| 役割 | 担当 | 必須か |
+|---|---|---|
+| 実装 | Claude Code | 必須 |
+| レビュー | GPT / ChatGPT（PR の差分を確認し、結果を PR に記録する） | 必須 |
+| 追加レビュー | Codex Cloud（PR へのコメント `@codex review`） | 任意（受入の条件にしない） |
+| マージ・最終承認 | 人間（@masube-arent） | 必須 |
+
+ChatGPT から GitHub へのレビュー投稿が権限不足で失敗した場合は、ChatGPT の確認結果を、誰が記録したかを明記して
+PR のコメントに残す。このコメントは GitHub 上の承認レビュー（Approve）ではなく、マージの判断は人間が行う。
 
 ### 使わないもの
 
@@ -59,7 +70,8 @@ VPS・常駐プロセスを持たずに、クラウド上の AI 機能だけで�
 ### 未検証の項目
 
 - [ ] Routine の定期実行の安定性
-- [ ] Codex Cloud レビューの応答
+- [ ] ChatGPT から GitHub への PR レビュー投稿（CLOUD-0001 では権限 403 で未完了）
+- [ ] Codex Cloud レビューの応答（任意）
 - [ ] 並列実行の上限
 
 ## Phase 3: 実行状態の永続化と自動再開

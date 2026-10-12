@@ -17,6 +17,11 @@ import time
 from pathlib import Path
 
 from . import gitops, stages
+from .publishing import execution_allowed, publish_allowed
+
+# stages that run untrusted code (an AI CLI, or an acceptance command an AI may
+# have written); 'judge' and 'resume' are trusted (no untrusted code runs)
+UNTRUSTED_STAGES = {"work", "check", "review"}
 from .procs import kill_tree
 from .store import MODEL_STAGES, Store
 
@@ -67,15 +72,20 @@ class LeaseKeeper(threading.Thread):
             store.db.close()
 
 
-def stage_env(cfg, worktree, worker_id):
+def stage_env(cfg, worktree, worker_id, lease_tag=None):
     env = {k: v for k, v in os.environ.items() if k not in SECRET_ENV}
     env["AIWOS_ROOT"] = str(worktree)
-    env["AIWOS_WORKSPACES"] = str(Path(cfg["state_dir"]) / "workspaces" / f"w{worker_id:02d}")
+    if cfg.get("agent_user"):  # Security Fix 002: untrusted commands run as this user
+        env["AIWOS_AGENT_USER"], env["AIWOS_AGENT_GROUP"] = cfg["agent_user"], cfg["agent_group"]
+        env["AIWOS_AGENT_PYTHON"] = cfg["agent_python"]
+    env["AIWOS_WORKSPACES"] = str(Path(cfg["workspaces_dir"]) / f"w{worker_id:02d}")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
     if cfg["extra_path"]:
         env["PATH"] = os.pathsep.join(cfg["extra_path"] + [env.get("PATH", "")])
     for name, path in cfg["agent_bins"].items():
         env[{"claude": "AIWOS_CLAUDE_BIN", "codex": "AIWOS_CODEX_BIN"}[name]] = path
+    if lease_tag:  # lets the controller find this stage's processes even if their pid was never recorded
+        env["AIWOS_LEASE_TAG"] = lease_tag
     return env
 
 
@@ -91,6 +101,7 @@ class Worker:
         self.child = None
         self.keeper = None
         self.model_started = False
+        self.model_charged = False
         self.log = logging.getLogger(f"worker-{worker_id:02d}")
         handler = logging.FileHandler(self.logdir / f"worker-{worker_id:02d}.log")
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -125,6 +136,7 @@ class Worker:
                 self.sleep(cfg["poll_interval_s"])
                 continue
             self.model_started = False
+            self.model_charged = False
             stage_limit = cfg["stage_timeout_s"].get(task["stage"], 900) + cfg["kill_grace_s"] + 60
             self.keeper = LeaseKeeper(self.store.path, self.id, self.pid, task["task_id"], cfg["lease_ttl_s"],
                                       cfg["heartbeat_s"], max_duration=stage_limit + GIT_ALLOWANCE_S)
@@ -143,7 +155,7 @@ class Worker:
                 self.store.finish(self.id, self.pid, task["task_id"], stage=task["stage"], agent=task["agent"],
                                   state="queued", reason=f"worker error: {type(exc).__name__}: {str(exc)[:300]}",
                                   delay=60, reset_attempts=False, max_attempts=cfg["max_stage_attempts"],
-                                  ai_run=self.model_started)
+                                  ai_run=self.model_started and not self.model_charged)
                 self.safe_reset()
             finally:
                 self.keeper.done.set()
@@ -166,8 +178,20 @@ class Worker:
 
     def handle(self, task):
         cfg, tid, stage = self.cfg, task["task_id"], task["stage"]
-        ai_run = stage in MODEL_STAGES
-        if ai_run and task["ai_runs"] >= cfg["max_ai_runs_per_task"]:
+        if stage in UNTRUSTED_STAGES:
+            # Security Fix 002 item 4: never run AI while a GitHub credential is
+            # readable by the agent's OS user and isolation is unverified — even
+            # for publish=none or a local remote. Park, don't hold: it clears when
+            # isolation is verified or the credential is removed.
+            allowed, why = execution_allowed(cfg, self.store)
+            if not allowed:
+                self.store.finish(self.id, self.pid, tid, stage=stage, agent=task["agent"], state="waiting",
+                                  reason=why, delay=max(60, cfg["isolation_check_ttl_s"] // 2),
+                                  refund_attempt=True)  # nothing ran: this claim does not count
+                self.log.warning("task %s: %s", tid, why)
+                return
+        model_stage = stage in MODEL_STAGES
+        if model_stage and task["ai_runs"] >= cfg["max_ai_runs_per_task"]:
             self.store.finish(self.id, self.pid, tid, stage=stage, agent=task["agent"], state="held",
                               reason=f"AI run budget spent ({task['ai_runs']}/{cfg['max_ai_runs_per_task']})")
             return
@@ -179,6 +203,11 @@ class Worker:
         logfile = self.logdir / "stages" / tid / f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{stage}.log"
         logfile.parent.mkdir(parents=True, exist_ok=True)
         self.log.info("task %s: stage %s (attempt %s)", tid, stage, task["attempts"])
+        if model_stage:
+            # charged before the model process exists: no kill can leave it uncounted,
+            # so no finish() below charges it again
+            self.store.charge_ai_run(self.id, self.pid, tid)
+            self.model_charged = True
         code, lost, timed_out = self.execute(task, argv, logfile, timeout + cfg["kill_grace_s"] + 60)
         if lost or self.keeper.lost.is_set():
             # someone reclaimed the lease: our result does not count and is not committed
@@ -190,10 +219,10 @@ class Worker:
             self.safe_reset()
             if self.stopping:  # a shutdown is not the stage's fault: the attempt is refunded
                 self.store.finish(self.id, self.pid, tid, stage=stage, agent=task["agent"], state="queued",
-                                  reason="stopped", ai_run=ai_run, refund_attempt=True)
+                                  reason="stopped", refund_attempt=True)
             else:
                 self.store.finish(self.id, self.pid, tid, stage=stage, agent=task["agent"], state="queued",
-                                  reason=f"stage killed after {timeout}s + grace", ai_run=ai_run, delay=60,
+                                  reason=f"stage killed after {timeout}s + grace", delay=60,
                                   reset_attempts=False, max_attempts=cfg["max_stage_attempts"])
             return
 
@@ -206,6 +235,8 @@ class Worker:
         delay, detail = 0, {"exit": code, "commit": commit, "status": contract["status"]}
         retry = False  # True: same stage again, counted against max_stage_attempts
 
+        if code == EXIT_BLOCKED and task["agent"] and self.model_charged:
+            self.store.refund_ai_run(self.id, self.pid, tid, "runner refused before starting the agent")
         if code == EXIT_BLOCKED and task["agent"]:
             # not logged in / unverified auth: park every stage of this agent, re-check later
             self.store.set_agent_status(task["agent"], False, output.strip().splitlines()[-1][:300] if output else "blocked")
@@ -216,13 +247,13 @@ class Worker:
             retry = True
         elif code in (EXIT_INVALID, EXIT_BLOCKED):
             nxt, agent, state, reason = stage, task["agent"], "held", f"runner refused (exit {code}): {output[-300:]}"
-        elif ai_run and code != EXIT_OK and RATE_LIMIT.search(self.agent_output(contract, output)):
+        elif model_stage and code != EXIT_OK and RATE_LIMIT.search(self.agent_output(contract, output)):
             wait = self.store.backoff(task["agent"], cfg["backoff_initial_s"], cfg["backoff_max_s"],
                                       f"usage limit reported during {tid} {stage}")
             detail["backoff_s"] = wait
             if state == "queued":  # e.g. a failed review: same stage again once the backoff ends
                 state, delay = "waiting", wait
-        elif ai_run and code == EXIT_OK:
+        elif model_stage and code == EXIT_OK:
             self.store.clear_backoff(task["agent"])
 
         if state == "queued" and delay:
@@ -235,7 +266,7 @@ class Worker:
         self.store.record_publish(tid, publish)
         detail.update(publish)
         self.store.finish(self.id, self.pid, tid, stage=nxt or stage, agent=agent, state=state, reason=reason,
-                          ai_run=ai_run, delay=delay, detail=detail, reset_attempts=not retry,
+                          delay=delay, detail=detail, reset_attempts=not retry,
                           max_attempts=cfg["max_stage_attempts"])
         gitops.git(str(self.worktree), "checkout", "--detach", "--quiet")  # free the branch for other workers
         self.log.info("task %s: %s -> %s/%s (%s)", tid, stage, state, nxt, reason)
@@ -243,7 +274,7 @@ class Worker:
     def execute(self, task, argv, logfile, hard_timeout):
         """Run the stage, renewing the lease; kill the whole tree on timeout,
         on stop, or when the lease is taken away."""
-        env = stage_env(self.cfg, self.worktree, self.id)
+        env = stage_env(self.cfg, self.worktree, self.id, lease_tag=f"{task['task_id']}:{self.pid}")
         with open(logfile, "wb") as log:
             self.child = subprocess.Popen(argv, cwd=self.worktree, env=env, stdout=log, stderr=subprocess.STDOUT,
                                           start_new_session=True)
@@ -277,11 +308,30 @@ class Worker:
         return "\n".join(texts)
 
     def publish(self, task, contract):
+        """Publish only verified content, and only when credentials cannot reach
+        an AI (Security Fix 002). A refused gate holds nothing back from the
+        local record; it only keeps it off GitHub."""
         cfg = self.cfg
+        if cfg["publish"] == "none":
+            return {"published": False}
+        from scan_secrets import find_in_text
+        problems = gitops.verify_publishable(
+            cfg["repo_dir"], self.worktree, task["task_id"], task["contract_path"],
+            f"{cfg['remote']}/{cfg['base_branch']}", cfg["code_dir"], find_in_text)
+        if problems:
+            self.store.event("publish_gate_refused", self.id, task["task_id"], detail=problems)
+            return {"published": False, "gate_refused": problems[:5]}
+        head = gitops.rev(cfg["repo_dir"], f"refs/heads/{gitops.TASK_BRANCH.format(task['task_id'])}")
+        allowed, why = publish_allowed(cfg, self.store)
+        if not allowed:  # verified, but credentials could reach an AI: keep it local; republish once safe
+            self.store.event("publish_blocked", self.id, task["task_id"], detail=why)
+            return {"published": False, "publish_blocked": why, "gate_sha": head}
         title, body = gitops.pr_text(task["task_id"], contract)
         try:
-            return gitops.publish(cfg["repo_dir"], cfg["publish"], cfg["remote"], cfg["base_branch"], task,
-                                  title, body)
+            result = gitops.publish(cfg["repo_dir"], cfg["publish"], cfg["remote"], cfg["base_branch"], task,
+                                    title, body, github_repo=cfg["github_repo"])
+            result["gate_sha"] = head
+            return result
         except Exception as exc:
             self.log.warning("publish failed for %s: %s", task["task_id"], exc)
             return {"published": False, "publish_error": str(exc)[:300]}

@@ -12,6 +12,8 @@ import os
 import shutil
 import subprocess
 
+import isolation
+
 # Environment passed to an agent or a check: an allowlist, so tokens such as
 # GH_TOKEN, OPENAI_API_KEY or ANTHROPIC_API_KEY never reach a child process.
 # Dropping the API-key variables also keeps the CLIs on their login session
@@ -34,7 +36,7 @@ def scrubbed_env(extra_keys=()):
 
 def _first_line(argv, env):
     try:
-        out = subprocess.run(argv, capture_output=True, text=True, timeout=30, env=env)
+        out = isolation.run(argv, env, "/", 30, capture_output=True, text=True)
     except (OSError, subprocess.TimeoutExpired):
         return None
     lines = (out.stdout or out.stderr).strip().splitlines()
@@ -63,10 +65,12 @@ class Adapter:
         """Return (auth_record, refusal_reason_or_None)."""
         raise NotImplementedError
 
-    def argv(self, path, role, workspace, run_dir, schema_path, model):
+    def argv(self, path, role, workspace, out_dir, schema_path, model):
+        """workspace: the tree the agent works in. out_dir: the only other place
+        the agent may write (its CLI's own output files)."""
         raise NotImplementedError
 
-    def parse(self, stdout, run_dir):
+    def parse(self, stdout, out_dir):
         """Return dict: models_reported, session_id, cost_usd, num_turns,
         is_error, structured (reviewer verdict or None)."""
         raise NotImplementedError
@@ -85,8 +89,7 @@ class ClaudeCode(Adapter):
     def auth(self, path):
         record = {"checked": True, "logged_in": None, "method": None, "provider": None}
         try:
-            out = subprocess.run([path, "auth", "status"], capture_output=True, text=True,
-                                 timeout=30, env=self.env())
+            out = isolation.run([path, "auth", "status"], self.env(), "/", 30, capture_output=True, text=True)
             data = json.loads(out.stdout)
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
             return record, "could not read `claude auth status`"
@@ -100,7 +103,7 @@ class ClaudeCode(Adapter):
             return record, f"auth method '{record['method']}' is not on the verified allowlist {sorted(self.ALLOWED_AUTH)}"
         return record, None
 
-    def argv(self, path, role, workspace, run_dir, schema_path, model):
+    def argv(self, path, role, workspace, out_dir, schema_path, model):
         argv = [path, "-p", "--output-format", "json", "--no-session-persistence", "--strict-mcp-config",
                 "--disallowedTools", self.DENY]
         if role == "worker":
@@ -113,7 +116,7 @@ class ClaudeCode(Adapter):
             argv += ["--model", model]
         return argv  # prompt goes to stdin
 
-    def parse(self, stdout, run_dir):
+    def parse(self, stdout, out_dir):
         try:
             data = json.loads(stdout)
         except json.JSONDecodeError:
@@ -140,8 +143,7 @@ class CodexCli(Adapter):
         # refused rather than guessed.
         record = {"checked": True, "logged_in": None, "method": None, "provider": None}
         try:
-            out = subprocess.run([path, "login", "status"], capture_output=True, text=True,
-                                 timeout=30, env=self.env())
+            out = isolation.run([path, "login", "status"], self.env(), "/", 30, capture_output=True, text=True)
         except (OSError, subprocess.TimeoutExpired):
             return record, "could not run `codex login status`"
         text = (out.stdout + out.stderr).lower()
@@ -156,17 +158,19 @@ class CodexCli(Adapter):
             return record, None
         return record, "codex login method not recognised; refusing until it is verified"
 
-    def argv(self, path, role, workspace, run_dir, schema_path, model):
+    def argv(self, path, role, workspace, out_dir, schema_path, model):
         sandbox = "workspace-write" if role == "worker" else "read-only"
-        argv = [path, "exec", "-s", sandbox, "-C", str(workspace), "--json", "--ephemeral",
-                "-o", str(run_dir / "last-message.txt")]
+        # --skip-git-repo-check: the workspace tree has no .git of its own (its git
+        # metadata is kept where the agent cannot write it)
+        argv = [path, "exec", "-s", sandbox, "-C", str(workspace), "--skip-git-repo-check", "--json", "--ephemeral",
+                "-o", str(out_dir / "last-message.txt")]
         if role == "reviewer":
             argv += ["--output-schema", str(schema_path)]
         if model:
             argv += ["-m", model]
         return argv + ["-"]  # `-`: read the prompt from stdin
 
-    def parse(self, stdout, run_dir):
+    def parse(self, stdout, out_dir):
         # Event names in `--json` output have not been observed on this
         # version; ids and usage are picked up only if present.
         session_id, models, turns = None, None, 0
@@ -189,11 +193,11 @@ class CodexCli(Adapter):
         if models and usage_in is not None:
             models[0].update(input_tokens=usage_in, output_tokens=usage_out)
         structured = None
-        last = run_dir / "last-message.txt"
-        if last.is_file():
+        data = isolation.read_untrusted(out_dir / "last-message.txt")
+        if data is not None:
             try:
-                structured = json.loads(last.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
+                structured = json.loads(data.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 structured = None
         return {"models_reported": models, "session_id": session_id, "cost_usd": None,
                 "num_turns": turns or None, "is_error": False, "structured": structured}

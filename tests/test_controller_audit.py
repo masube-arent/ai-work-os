@@ -116,6 +116,7 @@ class RetryLimitIntegration(Case):
 
 # ---------------------------------------------------------------- 2. PR retry
 
+@unittest.skip("replaced by tests/test_isolation.py RestPullRequest{Gitops,Retry,NotCalledWithoutIsolation}: REST (gh api) create/dedup/retry and the fail-closed gate")
 class PullRequestRetry(Case):
     def test_pr_creation_failed_after_push_is_retried_once_it_can_succeed(self):
         sb = self.make(n_tasks=1, workers=2, config={"publish": "github"})
@@ -178,26 +179,67 @@ class LiveOwnerExpiredLease(Case):
         self.assertTrue(sb.events("stale_owner_stopped"))
 
 
-class ModelRunOfDeadWorkerIsCharged(unittest.TestCase):
-    """Found in the live run of 2026-10-11: a worker killed during a real Claude
-    run left ai_runs at 1 after three model runs, because only the worker's own
-    finish() charged the run. A reclaimed model stage whose stage process was
-    started must count against max_ai_runs_per_task."""
+class ModelRunsAreChargedBeforeTheyStart(unittest.TestCase):
+    """Security Fix 002, item 8 (supersedes the reclaim-time charge of 427e222,
+    which missed a worker killed between starting the stage and recording its
+    pid). A model run is charged before its process exists."""
 
-    def test_reclaimed_model_stage_counts_as_an_ai_run(self):
-        dead = subprocess.Popen([sys.executable, "-c", "pass"])
-        dead.wait()  # a pid that no longer runs: the "killed worker"
+    def store(self, d):
+        s = Store(os.path.join(d, "q.db"))
+        s.init(2, 2)
+        s.upsert_new("T-1", "x", "b", "work", "claude-code", "queued")
+        return s
+
+    def dead_pid(self):
+        p = subprocess.Popen([sys.executable, "-c", "pass"])
+        p.wait()
+        return p.pid
+
+    def test_killed_before_its_pid_was_recorded_still_counts(self):
         with tempfile.TemporaryDirectory() as d:
-            store = Store(os.path.join(d, "q.db"))
-            store.init(2, 2)
-            store.upsert_new("T-1", "x", "b", "work", "claude-code", "queued")
-            store.upsert_new("T-2", "x", "b", "check", None, "queued")
-            for wid in (1, 2):
-                task = store.claim(wid, dead.pid, 60, {"claude-code"})
-                store.set_child(wid, dead.pid, task["task_id"], 999999)  # stage process was started
-            store.reclaim(3, [("T-1", dead.pid), ("T-2", dead.pid)])
-            self.assertEqual(store.get("T-1")["ai_runs"], 1)  # model stage: charged
-            self.assertEqual(store.get("T-2")["ai_runs"], 0)  # check runs no model
+            store, dead = self.store(d), self.dead_pid()
+            store.claim(1, dead, 60, {"claude-code"})
+            self.assertTrue(store.charge_ai_run(1, dead, "T-1"))
+            # the worker dies here: no set_child, no finish
+            store.reclaim(3, [("T-1", dead)])
+            self.assertEqual(store.get("T-1")["ai_runs"], 1)
+
+    def test_a_completed_run_counts_once(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = self.store(d)
+            store.claim(1, os.getpid(), 60, {"claude-code"})
+            store.charge_ai_run(1, os.getpid(), "T-1")
+            store.finish(1, os.getpid(), "T-1", stage="review", agent="codex-cli", state="queued")
+            self.assertEqual(store.get("T-1")["ai_runs"], 1)
+
+    def test_runner_refusal_before_the_agent_started_is_refunded(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = self.store(d)
+            store.claim(1, os.getpid(), 60, {"claude-code"})
+            store.charge_ai_run(1, os.getpid(), "T-1")
+            store.refund_ai_run(1, os.getpid(), "T-1", "not logged in")
+            self.assertEqual(store.get("T-1")["ai_runs"], 0)
+
+    def test_only_the_lease_holder_can_charge(self):
+        with tempfile.TemporaryDirectory() as d:
+            store = self.store(d)
+            store.claim(1, os.getpid(), 60, {"claude-code"})
+            self.assertFalse(store.charge_ai_run(2, os.getpid(), "T-1"))
+            self.assertEqual(store.get("T-1")["ai_runs"], 0)
+
+
+class StageProcessFoundByLeaseTag(unittest.TestCase):
+    def test_tagged_process_is_found_without_a_recorded_pid(self):
+        from controller.procs import find_tagged
+        tag = f"T-9:{os.getpid()}"
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"],
+                             env={**os.environ, "AIWOS_LEASE_TAG": tag})
+        try:
+            self.assertEqual(find_tagged(tag), [p.pid])
+            self.assertEqual(find_tagged("T-9:1"), [])
+        finally:
+            p.kill()
+            p.wait()
 
 
 class LeaseKeeperLimit(unittest.TestCase):

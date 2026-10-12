@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS tasks (
   remote_sha TEXT,    -- task branch commit last seen on (or pushed to) the remote
   pr_url TEXT,        -- set once a pull request is known to exist
   pr_error TEXT,      -- last PR creation failure, retried by the sync
+  gate_sha TEXT,      -- last task-branch commit that passed the publish gate
   updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY, value TEXT, updated_at REAL
 );
 CREATE TABLE IF NOT EXISTS workers (
   worker_id INTEGER PRIMARY KEY,
@@ -86,7 +90,7 @@ class Store:
         self.db.execute("PRAGMA synchronous=NORMAL")
 
     # columns added after the first v0.3 schema; added to older databases on start
-    MIGRATIONS = {"main_sha": "TEXT", "remote_sha": "TEXT", "pr_url": "TEXT", "pr_error": "TEXT"}
+    MIGRATIONS = {"main_sha": "TEXT", "remote_sha": "TEXT", "pr_url": "TEXT", "pr_error": "TEXT", "gate_sha": "TEXT"}
 
     def init(self, workers, model_slots):
         self.db.executescript(SCHEMA)
@@ -151,9 +155,40 @@ class Store:
                 self.event(kind, task_id=task_id, stage=fields.get("stage"), detail=detail, db=db)
             return bool(cur.rowcount)
 
+    def set_meta(self, key, value):
+        with self.tx() as db:
+            db.execute("INSERT INTO meta(key, value, updated_at) VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                       "value=excluded.value, updated_at=excluded.updated_at", (key, json.dumps(value), time.time()))
+
+    def get_meta(self, key):
+        row = self.db.execute("SELECT value, updated_at FROM meta WHERE key=?", (key,)).fetchone()
+        return (json.loads(row["value"]), row["updated_at"]) if row else (None, None)
+
+    def charge_ai_run(self, worker_id, pid, task_id):
+        """Count a model run BEFORE its process starts (Security Fix 002, #8): a
+        worker killed at any moment after this cannot leave the run uncounted.
+        Only the lease holder may charge."""
+        with self.tx() as db:
+            cur = db.execute("UPDATE tasks SET ai_runs=ai_runs+1 WHERE task_id=? AND state='leased' AND lease_owner=? "
+                             "AND lease_pid=?", (task_id, worker_id, pid))
+            if cur.rowcount:
+                self.event("ai_run_charged", worker_id, task_id, db=db)
+            return cur.rowcount == 1
+
+    def refund_ai_run(self, worker_id, pid, task_id, why):
+        """Undo a charge when the runner proves no model ran (it refused before
+        starting the agent, e.g. the CLI was not logged in)."""
+        with self.tx() as db:
+            cur = db.execute("UPDATE tasks SET ai_runs=MAX(ai_runs-1, 0) WHERE task_id=? AND state='leased' "
+                             "AND lease_owner=? AND lease_pid=?", (task_id, worker_id, pid))
+            if cur.rowcount:
+                self.event("ai_run_refunded", worker_id, task_id, detail=why, db=db)
+
     def record_publish(self, task_id, result):
         """Remember what a publish achieved, independently of any lease."""
         fields = {}
+        if result.get("gate_sha"):
+            fields["gate_sha"] = result["gate_sha"]
         if result.get("pushed_sha"):
             fields["remote_sha"] = result["pushed_sha"]
         if result.get("pr"):
@@ -282,12 +317,10 @@ class Store:
                     state, reason = "held", f"stage '{row['stage']}' leased {row['attempts']} times without finishing"
                 else:
                     state, reason = "queued", "lease reclaimed"
-                # a model stage whose process was started counts as an AI run even
-                # though its worker died before it could charge the run itself
-                charged = 1 if row["stage"] in MODEL_STAGES and row["lease_child"] else 0
+                # model runs were charged before they started (charge_ai_run), so a
+                # reclaimed stage needs no further accounting here
                 db.execute("UPDATE tasks SET state=?, reason=?, lease_owner=NULL, lease_pid=NULL, lease_expires=NULL, "
-                           "lease_child=NULL, ai_runs=ai_runs+?, updated_at=? WHERE task_id=?",
-                           (state, reason, charged, now, row["task_id"]))
+                           "lease_child=NULL, updated_at=? WHERE task_id=?", (state, reason, now, row["task_id"]))
                 self.event("reclaimed", row["lease_owner"], row["task_id"], row["stage"],
                            {"to": state, "pid": row["lease_pid"]}, db=db)
                 reclaimed.append(row["task_id"])

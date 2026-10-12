@@ -43,7 +43,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parent
+CODE_ROOT = HERE.parent  # rules and schemas: always this checkout
+# data: contracts, runs/ and git. AIWOS_ROOT lets the controller run this
+# trusted copy against a task worktree (see validate-task.py).
+ROOT = Path(os.environ["AIWOS_ROOT"]).resolve() if os.environ.get("AIWOS_ROOT") else CODE_ROOT
 sys.path.insert(0, str(HERE))
 from adapters import ADAPTERS, scrubbed_env  # noqa: E402
 from scan_secrets import find_in_text  # noqa: E402
@@ -60,8 +63,8 @@ vt = _load("validate_task", "validate-task.py")
 rb = _load("render_brief", "render-brief.py")
 
 RUNS = ROOT / "runs"
-REVIEW_SCHEMA = ROOT / "contracts" / "review.schema.json"
-RUN_SCHEMA = ROOT / "contracts" / "run.schema.json"
+REVIEW_SCHEMA = CODE_ROOT / "contracts" / "review.schema.json"
+RUN_SCHEMA = CODE_ROOT / "contracts" / "run.schema.json"
 OUTPUT_CAP = 2_000_000
 DEFAULT_TIMEOUT = {"worker": 900, "reviewer": 600, "check": 300}
 BLOCKING_SEVERITIES = {"blocker", "high"}

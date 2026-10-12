@@ -1,0 +1,53 @@
+# AI WORK OS v0.3 controller (10 local workers). See docs/controller.md.
+# Install: sudo cp deploy/systemd/aiwos-controller.service /etc/systemd/system/
+#          sudo systemctl daemon-reload && sudo systemctl enable --now aiwos-controller
+[Unit]
+Description=AI WORK OS controller (local workers, no GitHub Actions)
+After=network-online.target
+Wants=network-online.target
+# give up after 5 crashes in 10 minutes instead of restarting forever
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=aiwos
+Group=aiwos
+# trusted code checkout (never a task branch)
+WorkingDirectory=/opt/aiwos/code
+# GH_TOKEN for publish=github lives only here (mode 0600, owned by root); never in the repository
+EnvironmentFile=-/etc/aiwos/controller.env
+Environment=HOME=/var/lib/aiwos/home
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -m controller run --config /etc/aiwos/controller.json
+Restart=always
+RestartSec=15
+# stop: SIGTERM to the controller, which stops its workers; whatever is left in
+# the cgroup (agents included) is killed after TimeoutStopSec
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=180
+
+# --- hardening: the service can write only its state, its clone and its home
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/aiwos /srv/aiwos
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+UMask=0027
+# resource ceilings for 10 workers + up to model_concurrency agent processes
+MemoryMax=12G
+TasksMax=4096
+
+[Install]
+WantedBy=multi-user.target

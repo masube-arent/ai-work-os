@@ -4,8 +4,8 @@ GitHub を共通の情報基盤として、ChatGPT・Claude Code・Codex CLI・�
 **モデル非依存の業務基盤**。業務ルール・品質基準・実行記録をリポジトリに置き、
 実行主体（AI）を交換しても同じ契約・同じ品質ゲートで仕事を回せるようにする。
 
-> 現在のバージョン: **v0.2（Phase 2: マルチAI実行基盤）**。Claude Code の実行は確認済み、
-> Codex CLI は導入済みだが未ログインのため実行していない。
+> 現在のバージョン: **v0.3（10 ワーカー継続運転の controller）**。Claude Code の実行は確認済み、
+> Codex CLI は導入済みだが未ログインのため実行していない。GitHub Actions は使わない。
 > 何が実装済みで何が未実装かは [docs/architecture.md](docs/architecture.md) と [docs/roadmap.md](docs/roadmap.md) を参照。
 
 ## 考え方
@@ -24,6 +24,9 @@ GitHub を共通の情報基盤として、ChatGPT・Claude Code・Codex CLI・�
 README.md, AGENTS.md, CLAUDE.md   入口・AI向け作業規則
 core/          共通OS: policy / quality / contract / permissions / state-machine / execution
 profiles/      業務別ルール: development, document-compare, drawing-analysis(雛形), data-analysis(雛形)
+controller/    v0.3: 10 ワーカーの controller（SQLite WAL キュー、systemd 常駐）
+config/        controller.example.json
+deploy/        systemd/aiwos-controller.service
 contracts/     task.schema.json（タスク契約 0.2）, run.schema.json（実行記録）, review.schema.json（レビュー出力）,
                task.example.json（起票テンプレート）
 agents/        routing（担当の決め方）, claude, codex
@@ -31,7 +34,7 @@ scripts/       aiwos.py（ランナー）, adapters.py（CLI ごとの差異）,
                render-brief.py, scan_secrets.py, check.sh
 examples/      development/（DEV-0001, 担当入替の DEV-0002）, document-compare/（DOC-0001）
 runs/          実行記録（run.json・プロンプト・出力・差分・検証ログ。SHA-256 で照合）
-tests/         unittest（90件、エージェントはスタブ）, fixtures/, results/（テスト・実証実験の記録）
+tests/         unittest（全テストでエージェントはスタブ。controller の負荷・障害試験を含む）, fixtures/, results/（テスト・実証実験の記録）
 docs/          architecture, roadmap
 .claude/settings.json   Claude Code の権限制限（deny / ask）
 .githooks/pre-commit    コミット前の秘密情報スキャン
@@ -105,7 +108,22 @@ python3 scripts/aiwos.py metrics                                   # AI 別の�
 結果は `run/<task>/<run>` ブランチと `runs/` に記録される。停止条件・独立性の証明・測定項目は
 [core/execution.md](core/execution.md)。
 
-### 6. コミット前の品質ゲート
+### 6. 継続運転（v0.3 controller）
+
+最大 10 ワーカーが GitHub の main にある契約を取り、上の手順（work → check → review → judge）を
+ローカルで実行して、結果をタスクブランチと PR で GitHub に返す。キューは SQLite（WAL）、
+常駐は systemd。人間の判断が必要な段階（`passed` など）で止まり、マージも `accepted` もしない。
+
+```bash
+python3 -m controller check-config --config config/controller.example.json
+python3 -m controller sync-once    --config /etc/aiwos/controller.json   # 同期のみ
+python3 -m controller run          --config /etc/aiwos/controller.json   # 常駐（通常は systemd から）
+python3 -m controller status       --config /etc/aiwos/controller.json
+```
+
+構成・制御条件・配置手順・残課題は [docs/controller.md](docs/controller.md)。
+
+### 7. コミット前の品質ゲート
 
 ```bash
 bash scripts/check.sh

@@ -33,6 +33,35 @@
 - [ ] 実際の systemd 下での運転、実際の GitHub への PR 作成（VPS で検証する）
 - [ ] ワーカーごとの OS レベル隔離
 
+## クラウド実行モード（VPS なし）
+
+VPS・常駐プロセスを持たずに、クラウド上の AI 機能だけで「Issue → 実装 → 品質ゲート → Draft PR →
+独立レビュー → 人間が判断」を回す運用形態。初回実証は CLOUD-0001（Issue #4）。
+
+### 実行基盤
+
+- Claude Code Cloud セッション: Issue ごとに 1 セッションで実装し、`bash scripts/check.sh` を通して Draft PR を出す
+- Claude Code Routine: 定期的に Issue を確認し、未処理タスクを 1 件ずつ実行する
+- Codex Cloud: PR へのコメント `@codex review` による独立レビュー
+
+### 使わないもの
+
+- VPS、systemd、常駐 Controller（v0.3 の controller はこのモードでは動かさない）
+- GitHub Actions
+- 従量課金の AI API
+
+### 人間が行うこと
+
+- PR のマージ
+- タスクの最終承認（`accepted`）
+- AI はマージ（自動マージの有効化を含む）と承認を代行しない
+
+### 未検証の項目
+
+- [ ] Routine の定期実行の安定性
+- [ ] Codex Cloud レビューの応答
+- [ ] 並列実行の上限
+
 ## Phase 3: 実行状態の永続化と自動再開
 
 - 状態更新の CLI 化と競合検出は Phase 2 で実装済み（`aiwos.py transition`、ハッシュ比較 + ロック）

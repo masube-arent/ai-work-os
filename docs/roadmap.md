@@ -27,7 +27,7 @@
 
 - 状態更新の CLI 化と競合検出は Phase 2 で実装済み（`aiwos.py transition`、ハッシュ比較 + ロック）
 - 中断点からの自動再開
-- `by: human` の検証（Git のコミット者・署名との照合）
+- 人間承認の本人確認（GitHub の PR 承認との照合。設計案: `docs/human-approval.md`。Security Fix 001 で現在はフェイルクローズ）
 
 ## Phase 4: BreakLab との品質ゲート連携
 

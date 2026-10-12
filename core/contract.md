@@ -59,7 +59,8 @@ python3 scripts/validate-task.py path/to/task.json
 - `evidence` に `sha256` があれば `path` も必須。ディスク上のファイルからハッシュを再計算し、一致しなければ不正
 - `passed` / `accepted` では、PASS 判定が引用する証拠はすべて `path` + 検証済み `sha256` を持つ
 - `passed` / `accepted` では、実行記録（`run_record`）による独立性の証明が必要（`core/execution.md`）。
-  レビュアーが `human` の場合は `produced_by: human` の `review_note` が必要
+  レビュアーが `human` の場合は、本人確認の仕組みが未実装のため `passed` にできない（Security Fix 001）
+- `accepted` は、本人確認された承認の証拠がない限り不正（現在は常に不正。`docs/human-approval.md`）
 - 新しい実行主体 `aiwos-runner`（ランナー）。`produced_by` / `judged_by` / `history.by` に書けるが、担当にはなれない
 - 受入基準に `expected_exit_code`（任意、既定 0）
 - 証拠の種類に `run_record`（`runs/<task>/<run>/run.json`、`contracts/run.schema.json` 準拠）
@@ -67,5 +68,6 @@ python3 scripts/validate-task.py path/to/task.json
 ## 検査しないもの（限界）
 
 - 受入基準の文言が目的に対して十分かどうか（人間または ChatGPT のレビュー対象）
-- `history` の `by: human` が本当に人間の操作かどうか。CLI は人間を認証しない（Phase 3 で Git の署名・コミット者と照合する予定）
+- `history` の `by` が本当にその実行者の操作かどうか。CLI は呼び出し元を認証しない。
+  このため `accepted` と人間レビューは拒否し（フェイルクローズ）、それ以外の手動遷移には「未検証」と記録する
 - 実行記録そのものがランナー以外の手で作られていないこと。ハッシュは改変を検出するが、最初から偽造された記録は検出できない

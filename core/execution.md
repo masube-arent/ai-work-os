@@ -14,7 +14,7 @@
 | 7 | レビュー | `aiwos.py run TASK --role reviewer --execute` | — |
 | 8-9 | 品質判定・結果記録 | `aiwos.py judge TASK --write` | review → passed / rework / escalated |
 | 10 | 中断・再開 | `aiwos.py transition TASK --to suspended --by human` など | 遷移表に従う |
-| — | 最終承認 | `aiwos.py transition TASK --to accepted --by human` | passed → accepted |
+| — | 最終承認 | 本人確認された承認が必要。CLI からは拒否される（`docs/human-approval.md`） | passed → accepted（現在は不可） |
 
 `--execute` / `--write` を付けない場合はドライラン。実行するコマンド・作業場所・プロンプトを表示し、
 何も起動せず何も書かない。`aiwos.py status TASK` が現在の状態と次の操作を表示する。

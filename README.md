@@ -15,7 +15,8 @@ GitHub を共通の情報基盤として、ChatGPT・Claude Code・Codex CLI・�
 3. **自己申告は合格ではない** — 実装者と検証者を分け、証拠のない合格はスキーマで拒否する。
 4. **品質は3軸で判定** — 仕様適合性 / 正確性 / 完成度。検証できないものは `UNVERIFIED`。
 5. **自動修正には上限** — `max_retries`（最大3）を超えたら人間へエスカレーション。
-6. **最終判断は人間** — `accepted` に遷移できるのは `human` だけ。
+6. **最終判断は人間** — `accepted` は本人確認された人間の承認でのみ到達できる。
+   本人確認は未実装のため、現在は `--by human` を含むすべての経路で拒否される（[docs/human-approval.md](docs/human-approval.md)）。
 
 ## 構成
 
@@ -129,6 +130,6 @@ bash scripts/check.sh
 1. Codex CLI にログインし（`codex login --device-auth`）、`login status` と `--json` 出力の形式を確認して `adapters.py` の判定を確定する
 2. DEV-0001 を Codex でレビューし（`aiwos.py run ... --role reviewer --execute` → `judge --write`）、`passed` まで進める
 3. DEV-0002（Codex 実装・Claude レビュー）を DEV-0001 と同じ基点コミットから実行し、`aiwos.py metrics` で比較する
-4. OS レベルの隔離（別ユーザー・コンテナ）と、`by: human` の検証（Phase 3）
+4. OS レベルの隔離（別ユーザー・コンテナ）と、GitHub の認証済み承認による `accepted`（[docs/human-approval.md](docs/human-approval.md)）
 
 詳細は [docs/roadmap.md](docs/roadmap.md)。

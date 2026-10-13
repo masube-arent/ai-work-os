@@ -261,9 +261,11 @@ class ProcessSafety(Tmp):
         cfg = self.cfg()
         left = {101: cli.Proc("stage", "7"), 102: cli.Proc("worker", "8")}
         calls = []
-        with mock.patch.object(cli, "unsupervised", side_effect=[left, left, {}]), \
+        scans, calls = [], []
+        with mock.patch.object(cli, "unsupervised", side_effect=lambda c: scans.append(1) or (left if len(scans) <= 2 else {})), \
                 mock.patch.object(cli, "stop_process",
-                                  side_effect=lambda pid, proc, first, grace, escalate: calls.append((pid, first)) or "stopped"):
+                                  side_effect=lambda pid, proc, first, grace, escalate:
+                                  calls.append((pid, first)) or cli.Stop("stopped", [])):
             code, out, err = quiet(cli.cmd_stop, cfg)
         self.assertEqual(code, 0, err)
         self.assertIn("WARNING: running without a controller", out)
@@ -271,12 +273,15 @@ class ProcessSafety(Tmp):
 
     def test_stop_reports_what_it_could_not_end(self):
         cfg = self.cfg()
-        left = {101: cli.Proc("stage", "7")}
-        with mock.patch.object(cli, "unsupervised", return_value=left), \
-                mock.patch.object(cli, "stop_process", return_value="running"):
+        target = self.stand_in()
+        ticks = cli.process_start_ticks(target.pid)
+        left = {target.pid: cli.Proc("stage", ticks)}
+        with mock.patch.object(cli, "unsupervised", return_value=left), mock.patch.object(cli, "AGENT_STOP_S", 0), \
+                mock.patch.object(cli, "stop_process", return_value=cli.Stop("running", [(target.pid, ticks)])):
             code, _, err = quiet(cli.cmd_stop, cfg)
         self.assertEqual(code, 1)
-        self.assertIn("left for inspection", err)
+        self.assertIn("left running", err)
+        self.assertEqual(cli.live_survivors(cfg), [(target.pid, ticks)])
 
     def test_stop_uses_the_recorded_start_time_for_the_controller(self):
         cfg = self.cfg()
@@ -291,7 +296,7 @@ class ProcessSafety(Tmp):
         # /proc now shows another start time, the check must still use the recorded one
         with mock.patch.object(cli, "controller_pid", return_value=proc.pid), \
                 mock.patch.object(cli, "process_start_ticks", return_value="999999999"), \
-                mock.patch.object(cli, "stop_process", side_effect=lambda pid, p, *a, **k: seen.append(p) or "stopped"), \
+                mock.patch.object(cli, "stop_process", side_effect=lambda pid, p, *a, **k: seen.append(p) or cli.Stop("stopped", [])), \
                 mock.patch.object(cli, "unsupervised", return_value={}):
             quiet(cli.cmd_stop, cfg)
         self.assertEqual(seen, [cli.Proc("controller", recorded)])
@@ -301,11 +306,13 @@ class ProcessSafety(Tmp):
         # process of the same user: its start time differs, so nothing is sent
         bystander = self.stand_in()
         seen = cli.Proc("stage", str(int(cli.process_start_ticks(bystander.pid)) - 1))
-        self.assertEqual(cli.stop_process(bystander.pid, seen, signal.SIGINT, 0.5, escalate=True), "gone")
+        self.assertEqual(cli.stop_process(bystander.pid, seen, signal.SIGINT, 0.5, escalate=True).state, "gone")
         time.sleep(0.3)
         self.assertIsNone(bystander.poll(), "an unrelated process was signalled")
         cfg = self.cfg()
-        with mock.patch.object(cli, "unsupervised", side_effect=[{bystander.pid: seen}, {bystander.pid: seen}, {}]):
+        calls = []
+        with mock.patch.object(cli, "unsupervised",
+                               side_effect=lambda c: calls.append(1) or ({bystander.pid: seen} if len(calls) <= 2 else {})):
             code, _, err = quiet(cli.cmd_stop, cfg)
         self.assertEqual(code, 0, err)
         self.assertIsNone(bystander.poll(), "stop signalled a reused PID")
@@ -318,7 +325,7 @@ class ProcessSafety(Tmp):
                 cli.stop_process(target.pid, proc, signal.SIGINT, 0.5, escalate=True)
         self.assertIsNone(target.poll())
         with mock.patch.object(cli.os, "kill", side_effect=AssertionError("plain kill(2) must not be used")):
-            self.assertEqual(cli.stop_process(target.pid, proc, signal.SIGINT, 5, escalate=True), "stopped")
+            self.assertEqual(cli.stop_process(target.pid, proc, signal.SIGINT, 5, escalate=True).state, "stopped")
         self.assertEqual(target.wait(timeout=10), -signal.SIGINT)
 
     def test_escalates_to_sigkill_for_a_stage_that_ignores_sigint(self):
@@ -327,13 +334,122 @@ class ProcessSafety(Tmp):
                 f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(60)")
         top = self.stand_in(code=code)
         time.sleep(0.5)
-        children = cli.my_descendants(top.pid)
+        children = [int(e) for e in os.listdir("/proc") if e.isdigit() and cli._ppid(int(e)) == top.pid]
         self.assertEqual(len(children), 1)
         proc = cli.Proc("stage", cli.process_start_ticks(top.pid))
-        self.assertEqual(cli.stop_process(top.pid, proc, signal.SIGINT, 0.5, escalate=True), "killed")
+        self.assertEqual(cli.stop_process(top.pid, proc, signal.SIGINT, 0.5, escalate=True).state, "killed")
         self.assertEqual(top.wait(timeout=10), -signal.SIGKILL)
         from controller.store import pid_alive
-        self.assertTrue(cli_wait(lambda: not pid_alive(children[0][0]), 10), "the child was left running")
+        self.assertTrue(cli_wait(lambda: not pid_alive(children[0]), 10), "the child was left running")
+
+    # ---- a stage tree whose top ends before its children (GPT re-review of 6c0b456)
+
+    TOP_EXITS_ON_SIGINT = ("import signal,subprocess,sys,time\n"
+                           "child = subprocess.Popen(sys.argv[1:])\n"
+                           "signal.signal(signal.SIGINT, lambda *a: sys.exit(0))\n"
+                           "time.sleep(60)\n")
+    STUBBORN = "import signal,time; [signal.signal(s, signal.SIG_IGN) for s in (signal.SIGINT, signal.SIGTERM)]; time.sleep(60)"
+
+    def tree(self, child_argv):
+        top = self.stand_in(argv=[sys.executable, "-c", self.TOP_EXITS_ON_SIGINT, *child_argv])
+        self.assertTrue(cli_wait(lambda: any(cli._ppid(int(e)) == top.pid for e in os.listdir("/proc")
+                                             if e.isdigit()), 10), "the child did not start")
+        child = next(int(e) for e in os.listdir("/proc") if e.isdigit() and cli._ppid(int(e)) == top.pid)
+        self.addCleanup(lambda: subprocess.run(["kill", "-KILL", str(child)], capture_output=True))
+        return top, child
+
+    def test_children_that_outlive_their_runner_are_stopped_not_reported_stopped(self):
+        from controller.store import pid_alive
+        top, child = self.tree([sys.executable, "-c", self.STUBBORN])
+        r = cli.stop_process(top.pid, cli.Proc("stage", cli.process_start_ticks(top.pid)), signal.SIGINT, 0.5,
+                             escalate=True)
+        self.assertNotEqual(getattr(r, "state", r), "stopped", "success while a child was still running")
+        self.assertTrue(cli_wait(lambda: not pid_alive(child), 10), "the child of the runner was left running")
+
+    def test_descendants_are_pinned_before_the_signal_never_listed_after(self):
+        # the runner exits on SIGINT and its PID is (in effect) reused: a later
+        # listing would show another process tree under that PID
+        from controller.store import pid_alive
+        top, child = self.tree([sys.executable, "-c", "import time; time.sleep(60)"])
+        bystander = self.stand_in(code="import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)")
+        real_ppid = cli._ppid
+
+        def ppid(pid):  # once the runner is gone, the bystander "is its child"
+            if pid == bystander.pid and top.poll() is not None:
+                return top.pid
+            return real_ppid(pid)
+        with mock.patch.object(cli, "_ppid", side_effect=ppid), \
+                mock.patch.object(cli, "exited", side_effect=lambda fd, s: time.sleep(0.5) or False, create=True):
+            cli.stop_process(top.pid, cli.Proc("stage", cli.process_start_ticks(top.pid)), signal.SIGINT, 0.5,
+                             escalate=True)
+        time.sleep(0.3)
+        self.assertIsNone(bystander.poll(), "a process outside the pinned tree was signalled")
+        self.assertTrue(cli_wait(lambda: not pid_alive(child), 10))
+
+    def test_a_process_that_is_no_longer_a_child_when_pinned_is_left_alone(self):
+        # listed as a child, but by the time its pidfd is open its parent is another
+        # process (the listed PID was reused): it is not part of the tree, never signalled
+        top, child = self.tree([sys.executable, "-c", self.STUBBORN])
+        real_ppid, seen = cli._ppid, []
+
+        def ppid(pid):
+            if pid == child:
+                seen.append(1)
+                return top.pid if len(seen) == 1 else 1
+            return real_ppid(pid)
+        with mock.patch.object(cli, "_ppid", side_effect=ppid):
+            cli.stop_process(top.pid, cli.Proc("stage", cli.process_start_ticks(top.pid)), signal.SIGINT, 0.5,
+                             escalate=True)
+        time.sleep(0.3)
+        self.assertTrue(cli.still_running(child, cli.process_start_ticks(child)), "a re-parented process was signalled")
+
+    @unittest.skipIf(os.geteuid() != 0, "needs root to run a child as another user")
+    def test_another_users_process_that_survives_fails_closed_and_blocks_restart(self):
+        from controller.store import pid_alive
+        cfg = self.cfg()
+        Path(cfg["state_dir"]).mkdir(parents=True)
+        other = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--",
+                 sys.executable, "-c", self.STUBBORN]
+        top, child = self.tree(other)
+        r = cli.stop_process(top.pid, cli.Proc("stage", cli.process_start_ticks(top.pid)), signal.SIGINT, 0.5,
+                             escalate=True)
+        self.assertEqual(getattr(r, "state", r), "running", "success while another user's process was left")
+        self.assertTrue(pid_alive(child))  # never signalled: it is not ours to stop
+        # through stop: fail closed, and start is refused while it lives
+        top2, child2 = self.tree(other)
+        with mock.patch.object(cli, "unsupervised",
+                               side_effect=lambda c: {top2.pid: cli.Proc("stage", cli.process_start_ticks(top2.pid))}
+                               if top2.poll() is None else {}):
+            code, _, err = quiet(cli.cmd_stop, cfg)
+        self.assertEqual(code, 1, err)
+        self.assertTrue(pid_alive(child2))
+        with mock.patch.object(cli, "unsupervised", return_value={}), \
+                mock.patch.object(cli, "controller_pid", return_value=None):
+            with self.assertRaisesRegex(cli.Refused, "still running"):
+                cli.refuse_if_busy(cfg, "start")
+            subprocess.run(["kill", "-KILL", str(child), str(child2)], capture_output=True)
+            self.assertTrue(cli_wait(lambda: not pid_alive(child2) and not pid_alive(child), 10))
+            cli.refuse_if_busy(cfg, "start")  # gone: allowed again
+
+    @unittest.skipIf(os.geteuid() != 0, "needs root to run a stand-in as another user")
+    def test_agent_side_processes_are_found_and_never_signalled(self):
+        from controller.store import pid_alive
+        cfg = self.cfg()
+        tree_dir = Path(cfg["workspaces_dir"]) / "w01" / "tree"
+        tree_dir.mkdir(parents=True)
+        agent = self.stand_in(argv=["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--",
+                                    sys.executable, "-c", "import time; time.sleep(60)",
+                                    str(ROOT / "scripts" / "agent-exec.py"), "--cwd", str(tree_dir)])
+        self.assertTrue(cli_wait(lambda: any(p.kind == "agent" for p in cli.config_processes(cfg).values()), 10),
+                        cli.config_processes(cfg))
+        code, _, err = quiet(cli.cmd_stop, cfg)
+        self.assertEqual(code, 1, err)  # cannot be stopped by this user: fail closed
+        self.assertIsNone(agent.poll(), "an agent-side process was signalled directly")
+        with self.assertRaises(cli.Refused):
+            cli.refuse_if_busy(cfg, "start")
+        agent.kill()
+        agent.wait()
+        self.assertTrue(cli_wait(lambda: not cli.unsupervised(cfg), 10))
 
     def test_status_warns_about_unsupervised_processes(self):
         cfg = self.cfg()

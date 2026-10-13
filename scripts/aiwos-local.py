@@ -47,6 +47,8 @@ if str(ROOT) not in sys.path:
 CONFIG_DEFAULT = Path(os.environ.get("AIWOS_CONFIG", "~/.config/aiwos/local.json")).expanduser()
 # kept in the state directory, under names no config can take (see config_location_problem)
 PID_NAME, LOG_NAME, LOCK_NAME = "local-controller.pid", "local-controller.log", "local-controller.lock"
+SURVIVORS_NAME = "local-survivors.json"  # processes a stop could not end; they block start/sync/review
+AGENT_STOP_S = 15  # agent-exec.py: SIGTERM to its session, SIGKILL after 10 s
 TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
 # the first local runs (real-PC smoke test): these values exactly, and only the
 # dummy contract, matched by its path and by its task id
@@ -373,26 +375,43 @@ def _mine(pid):
         return False
 
 
+def _cwd_arg_inside(argv, directory):
+    try:
+        value = argv[argv.index("--cwd") + 1]
+    except (ValueError, IndexError):
+        return False
+    return inside(value, directory)
+
+
 def config_processes(cfg):
     """This user's processes that belong to this config, other than the
     controller in the pid file: {pid: Proc}. A controller or worker must have
     this config in its command line and run from this checkout; a stage runner
-    must carry a lease tag and point AIWOS_ROOT into this config's worktrees
-    (the agent side below it is reached through it, sudo relaying the signal).
+    must carry a lease tag and point AIWOS_ROOT into this config's worktrees.
+    The agent side (sudo and agent-exec.py working in this config's
+    workspaces, owned by root or the agent user) is listed as 'agent': it is
+    stopped only through its runner (sudo relaying the signal), never directly.
     Each process tree is listed once, by its top."""
     own, registered = os.getpid(), controller_pid(cfg)
     cfgarg = str(Path(cfg["_config_path"]).resolve())
     worktrees = Path(cfg["state_dir"]).resolve() / "worktrees"
+    agent_exec = str(ROOT / "scripts" / "agent-exec.py")
     found = {}
     for entry in os.listdir("/proc"):
         if not entry.isdigit() or int(entry) in (own, registered):
             continue
         pid = int(entry)
         try:
-            if not _mine(pid):
-                continue
             ticks = process_start_ticks(pid)
             argv = _argv(pid)
+            if agent_exec in argv and _cwd_arg_inside(argv, cfg["workspaces_dir"]):
+                # sudo or agent-exec of this config's workspaces, whoever owns it: the
+                # agent side of a stage. Waited for and reported, never signalled.
+                if ticks and process_start_ticks(pid) == ticks:
+                    found[pid] = Proc("agent", ticks)
+                continue
+            if not _mine(pid):
+                continue
             kind = None
             for action, name in (("run", "controller"), ("worker", "worker")):
                 expected = ["-m", "controller", action, "--config", cfgarg]
@@ -443,12 +462,6 @@ def open_verified(pid, ticks):
     return fd
 
 
-def exited(fd, seconds):
-    poller = select.poll()
-    poller.register(fd, select.POLLIN)  # a pidfd becomes readable when its process exits
-    return bool(poller.poll(max(0, seconds) * 1000))
-
-
 def send(fd, sig):
     try:
         signal.pidfd_send_signal(fd, sig)
@@ -457,71 +470,184 @@ def send(fd, sig):
         return False
 
 
-def my_descendants(pid):
-    """This user's processes below pid, with their start times, deepest last."""
+class Pinned(NamedTuple):
+    pid: int
+    ticks: str
+    fd: int       # pidfd, opened and checked against ticks while the parent was pinned
+    mine: bool    # owned by this user: may be SIGKILLed
+    relay: bool   # not ours but started by us (sudo, real uid = ours): SIGTERM asks it to relay
+
+
+class Stop(NamedTuple):
+    state: str        # gone | stopped | killed | running
+    survivors: list   # [(pid, start ticks)] still running when stop gave up
+
+
+def _real_uid(pid):
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text().splitlines():
+            if line.startswith("Uid:"):
+                return int(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def pin_tree(pid, ticks):
+    """Pidfds for pid and every descendant (any user), in breadth-first order.
+    Taken before anything is signalled, while pid is itself pinned: each
+    descendant is identified by its start time and must still be the child of
+    an already pinned process after its pidfd is open. Only these processes are
+    ever signalled or waited for; nothing is listed again later, so a PID that
+    is reused after its owner exits cannot bring an unrelated tree in.
+    None: pid is gone or is no longer the process seen."""
+    top = open_verified(pid, ticks)
+    if top is None:
+        return None
+    me = os.geteuid()
+    order = [Pinned(pid, ticks, top, _mine(pid), False)]
     children = {}
     for entry in os.listdir("/proc"):
-        if entry.isdigit() and _mine(int(entry)):
-            ppid = _ppid(int(entry))
-            if ppid is not None:
-                children.setdefault(ppid, []).append(int(entry))
-    out, todo = [], [pid]
-    while todo:
-        for child in children.get(todo.pop(), []):
-            ticks = process_start_ticks(child)
-            if ticks:
-                out.append((child, ticks))
-                todo.append(child)
-    return out
+        if entry.isdigit():
+            parent = _ppid(int(entry))
+            if parent is not None:
+                children.setdefault(parent, []).append(int(entry))
+    i = 0
+    while i < len(order):
+        parent = order[i].pid
+        i += 1
+        for child in children.get(parent, []):
+            cticks = process_start_ticks(child)
+            fd = open_verified(child, cticks) if cticks else None
+            if fd is None:
+                continue
+            if _ppid(child) != parent:  # re-parented meanwhile: not provably part of this tree
+                os.close(fd)
+                continue
+            mine = _mine(child)
+            order.append(Pinned(child, cticks, fd, mine, not mine and _real_uid(child) == os.getuid() and me != 0))
+    return order
+
+
+def wait_all(pinned, seconds):
+    """Wait until every pinned process has exited (its pidfd turns readable);
+    return those still running."""
+    left = {p.fd: p for p in pinned}
+    deadline = time.time() + seconds
+    while left:
+        poller = select.poll()
+        for fd in left:
+            poller.register(fd, select.POLLIN)
+        for fd, _ in poller.poll(max(0.0, deadline - time.time()) * 1000):
+            left.pop(fd, None)
+        if time.time() >= deadline:
+            break
+    return [p for p in pinned if p.fd in left]
 
 
 def stop_process(pid, proc, first, grace, escalate):
-    """Signal one verified process; with escalate, SIGKILL it and its verified
-    descendants of this user if it outlives the grace period. Returns 'gone'
-    (exited, or the PID now belongs to another process: nothing was sent),
-    'stopped', 'killed' or 'running'."""
-    fd = open_verified(pid, proc.ticks)
-    if fd is None:
-        return "gone"
+    """Stop one process and everything below it, all pinned beforehand.
+
+    `first` goes to the top only (a stage runner turns SIGINT into an orderly
+    stop and has sudo relay it to the agent side). Success means every pinned
+    process has exited, not just the top. With escalate, survivors that are
+    ours get SIGKILL (deepest first) and a sudo we started gets SIGTERM so it
+    relays; another user's process (the agent) is never signalled. Whatever
+    still runs after that is returned as survivors and the result is
+    'running': the caller must fail closed."""
+    tree = pin_tree(pid, proc.ticks)
+    if tree is None:
+        return Stop("gone", [])
     try:
-        if not send(fd, first) or exited(fd, grace):
-            return "stopped"
+        send(tree[0].fd, first)
+        left = wait_all(tree, grace)
+        if not left:
+            return Stop("stopped", [])
         if not escalate:
-            return "running"
-        for child, ticks in reversed(my_descendants(pid)):  # children first: they would be re-parented
-            cfd = open_verified(child, ticks)
-            if cfd is not None:
-                send(cfd, signal.SIGKILL)
-                os.close(cfd)
-        send(fd, signal.SIGKILL)
-        return "killed" if exited(fd, 10) else "running"
+            return Stop("running", [(p.pid, p.ticks) for p in left])
+        for p in reversed(left):  # deepest first: a child would be re-parented once its parent dies
+            if p.mine:
+                send(p.fd, signal.SIGKILL)
+            elif p.relay:
+                send(p.fd, signal.SIGTERM)
+        left = wait_all(left, AGENT_STOP_S)
+        return Stop("killed", []) if not left else Stop("running", [(p.pid, p.ticks) for p in left])
     finally:
-        os.close(fd)
+        for p in tree:
+            os.close(p.fd)
+
+
+def still_running(pid, ticks):
+    """The same process (start time) and not merely a zombie waiting to be reaped."""
+    try:
+        after = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+    except (OSError, IndexError):
+        return False
+    return len(after) > 19 and after[19] == ticks and after[0] not in ("Z", "X")
+
+
+def survivors_path(cfg):
+    return Path(cfg["state_dir"]) / SURVIVORS_NAME
+
+
+def live_survivors(cfg):
+    """Processes an earlier stop could not end, that are still the same processes."""
+    path = survivors_path(cfg)
+    try:
+        recorded = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    alive = [(pid, ticks) for pid, ticks in recorded if still_running(pid, ticks)]
+    if not alive:
+        path.unlink(missing_ok=True)
+    return alive
+
+
+def record_survivors(cfg, survivors):
+    merged = sorted(set(map(tuple, live_survivors(cfg))) | set(map(tuple, survivors)))
+    path = survivors_path(cfg)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(merged) + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
 
 
 def stop_leftovers(cfg):
     """Stop what a crash left running for this config, the way the controller
-    stops a dead worker's stage: a controller gets SIGTERM and is waited for
-    (never SIGKILL); a worker or a stage tree gets SIGTERM/SIGINT, then SIGKILL
-    after kill_grace_s. Every signal goes through a pidfd opened and checked
-    against the start time seen when the process was identified, so a PID
-    reused meanwhile is never signalled. Their leased tasks return to the
-    queue when the next controller finds the lease expired."""
-    left = unsupervised(cfg)
-    if not left:
+    stops a dead worker's stage, with every signal through a pidfd checked
+    against the start time seen at detection. A controller gets SIGTERM and is
+    waited for (never SIGKILL); a worker or a stage tree is stopped by
+    stop_process; the agent side is never signalled, only waited for. Anything
+    that cannot be shown to have ended is recorded: stop fails, and start,
+    sync and review are refused until those processes are gone."""
+    left, prior = unsupervised(cfg), live_survivors(cfg)
+    if not left and not prior:
         return 0
-    print(f"WARNING: running without a controller: {describe(left)} (an AI stage may have been running)")
+    if left:
+        print(f"WARNING: running without a controller: {describe(left)} (an AI stage may have been running)")
+    survivors = list(prior)
     for pid, proc in left.items():
-        if proc.kind == "controller" and stop_process(pid, proc, signal.SIGTERM, cfg["kill_grace_s"] + 60,
-                                                      escalate=False) == "running":
-            return die(f"controller {pid} not started by this CLI did not stop; left running", 1)
+        if proc.kind == "controller":
+            result = stop_process(pid, proc, signal.SIGTERM, cfg["kill_grace_s"] + 60, escalate=False)
+            if result.state == "running":
+                record_survivors(cfg, result.survivors)
+                return die(f"controller {pid} not started by this CLI did not stop; left running", 1)
     for pid, proc in unsupervised(cfg).items():
-        first = signal.SIGINT if proc.kind == "stage" else signal.SIGTERM
-        stop_process(pid, proc, first, cfg["kill_grace_s"], escalate=True)
-    remaining = unsupervised(cfg)
-    if remaining:
-        return die(f"still running, left for inspection: {describe(remaining)}", 1)
-    print(f"Stopped leftover processes: {describe(left)}")
+        if proc.kind in ("worker", "stage"):
+            first = signal.SIGINT if proc.kind == "stage" else signal.SIGTERM
+            survivors += stop_process(pid, proc, first, cfg["kill_grace_s"], escalate=True).survivors
+    # the agent side ends when its runner has had sudo relay the stop; give it the time agent-exec takes
+    deadline = time.time() + cfg["kill_grace_s"] + AGENT_STOP_S
+    while time.time() < deadline and unsupervised(cfg):
+        time.sleep(0.5)
+    survivors += [(pid, p.ticks) for pid, p in unsupervised(cfg).items()]
+    survivors = sorted({(pid, ticks) for pid, ticks in survivors if still_running(pid, ticks)})
+    if survivors:
+        record_survivors(cfg, survivors)
+        return die(f"could not show these stopped, left running: {survivors}. start, sync and review are refused "
+                   f"until they end (an agent stage ends at its own timeout) or an administrator stops them", 1)
+    survivors_path(cfg).unlink(missing_ok=True)
+    print(f"Stopped leftover processes: {describe(left)}" if left else "Earlier leftover processes have ended")
     return 0
 
 
@@ -529,6 +655,10 @@ def refuse_if_busy(cfg, what):
     pid = controller_pid(cfg)
     if pid:
         raise Refused(f"{what} is refused while the controller runs (PID {pid}); stop it first")
+    alive = live_survivors(cfg)
+    if alive:
+        raise Refused(f"{what} is refused: processes an earlier stop could not end are still running "
+                      f"({alive}); they must end first")
     left = unsupervised(cfg)
     if left:
         raise Refused(f"{what} is refused: processes of this config are running without a controller "
@@ -578,6 +708,9 @@ def cmd_status(cfg, raw=False):
     if left:
         print(f"WARNING: running without a controller: {describe(left)}; an AI stage may still be running. "
               f"Run stop to end them.")
+    alive = live_survivors(cfg)
+    if alive:
+        print(f"WARNING: an earlier stop could not end {alive}; start, sync and review are refused until they end")
     verdict = stored_isolation(cfg)
     if verdict is not None:
         print(f"Isolation: ok={verdict.get('ok')} reason={verdict.get('reason')}")
@@ -600,7 +733,8 @@ def cmd_stop(cfg):
             recorded = json.loads(pidpath.read_text())["start_ticks"]
             result = stop_process(pid, Proc("controller", recorded), signal.SIGTERM,
                                   cfg["kill_grace_s"] + 60, escalate=False)
-            if result == "running":
+            if result.state == "running":
+                record_survivors(cfg, result.survivors)
                 return die("stop timed out; the controller was left running for inspection", 1)
             print("Controller stopped")
         pidpath.unlink(missing_ok=True)

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# AI WORK OS local CLI (Linux / WSL2). Run as the controller user, e.g.
+#   sudo -u aiwos-ctl -H /opt/aiwos/code/aiwos --config /var/lib/aiwos-ctl/local.json status
+# Never sources env files and never prints credentials.
+set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec /usr/bin/python3 "$HERE/scripts/aiwos-local.py" "$@"

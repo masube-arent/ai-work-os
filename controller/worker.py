@@ -16,6 +16,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import config as config_mod
 from . import gitops, stages
 from .publishing import execution_allowed, publish_allowed
 
@@ -178,6 +179,12 @@ class Worker:
 
     def handle(self, task):
         cfg, tid, stage = self.cfg, task["task_id"], task["stage"]
+        if not config_mod.task_allowed(cfg, tid):
+            # a row queued before allowed_task_ids was set (or by hand): nothing runs for it
+            self.store.finish(self.id, self.pid, tid, stage=stage, agent=task["agent"], state="held",
+                              reason="task_id is not in allowed_task_ids: nothing was run", refund_attempt=True)
+            self.log.warning("task %s: not in allowed_task_ids; held without running", tid)
+            return
         if stage in UNTRUSTED_STAGES:
             # Security Fix 002 item 4: never run AI while a GitHub credential is
             # readable by the agent's OS user and isolation is unverified — even

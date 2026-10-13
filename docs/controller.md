@@ -125,6 +125,11 @@ PR 作成だけが失敗した場合、同期のたびに PR 作成だけを再�
     ローカル宛てでも、untrusted な段階（work / check / review）を実行しない。隔離が確認済みなら実行する
     （AI は別ユーザーで読めない）。認証情報が一切無い場合も実行する（スタブ試験）。該当時はタスクを waiting にして
     保留し、隔離の確認が取れるか認証情報が外れると自動で再開する。
+    `require_isolation: true`（ローカル CLI の設定）では、認証情報の有無にかかわらず、隔離の確認が取れているあいだだけ
+    実行する。WSL 上では、Windows の interop と自動マウントが無効であることも隔離の条件に含める（`controller/wsl.py`）。
+  - **実行できるタスクの制限**: `allowed_task_ids`（既定は null で制限なし）を設定すると、その ID の契約だけを
+    同期で待ち行列に入れ、ワーカーも実行直前に照合する（対象外は何も実行せずに held）。ローカル CLI の実機スモーク
+    テストでは `["DUMMY-0001"]`。
   - **ローカルremote の判定（監査 item 1）**: `publish: git` のローカル例外は、`git remote get-url --push --all` が返す
     **実効 push 先がすべてローカルパス（`/` か `file:///`）で、かつ 1 件以上ある場合のみ**許可する。`pushurl`・複数 push 先・
     `insteadOf`・`pushInsteadOf` による書換はこのコマンドに反映されるため、ネットワーク宛てを見逃さない。判定不能・混在は
@@ -141,6 +146,9 @@ PR 作成だけが失敗した場合、同期のたびに PR 作成だけを再�
     publish はフェイルクローズする（ローカルパスの remote への `publish: git` は可）。
 
 ## 配置手順（Ubuntu VPS）
+
+手元の Windows PC（WSL2）で動かす場合は [docs/local-cli.md](local-cli.md) のローカル CLI を使う
+（publish=none、`require_isolation=true`、WSL の interop と自動マウントの無効化が必須）。
 
 ```bash
 # 1. 信頼済みユーザー・AI 実行ユーザー・共有グループと sudoers を作る（Security Fix 002）

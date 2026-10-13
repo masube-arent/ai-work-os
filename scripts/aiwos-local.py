@@ -6,9 +6,10 @@ Ubuntu driven from Windows PowerShell through deploy/windows/aiwos.ps1).
                                       --agent-user U --agent-group G
   aiwos-local.py [--config FILE] doctor      checks only; never starts a model
   aiwos-local.py [--config FILE] start       controller in the background
-  aiwos-local.py [--config FILE] status [--json]
-  aiwos-local.py [--config FILE] stop        SIGTERM, wait; never SIGKILL
-  aiwos-local.py [--config FILE] sync        fetch and enqueue once, no workers
+  aiwos-local.py [--config FILE] status [--json]   warns about processes left by a crash
+  aiwos-local.py [--config FILE] stop        SIGTERM the controller and wait (never SIGKILL it),
+                                             then stop what a crash left running
+  aiwos-local.py [--config FILE] sync        fetch and enqueue once; refused while the controller runs
   aiwos-local.py [--config FILE] review TASK the contract's reviewer, controller stopped
 
 Run as the trusted controller user (aiwos-ctl), never as root or as the agent
@@ -16,7 +17,8 @@ user. No GitHub Actions, no VPS, no API keys: the AI CLIs use the agent user's
 own subscription logins. Every command that can start an AI first proves the
 OS isolation (scripts/isolation.py probe, plus the WSL checks in
 controller/wsl.py) and refuses otherwise. The local CLI only runs with
-publish=none and require_isolation=true. Based on the audited
+publish=none, require_isolation=true, 10 workers, 1 model slot and contracts
+under tasks/; start, stop, sync and review take one lock per state directory. Based on the audited
 aiwos-local-cli.zip (docs/local-cli.md lists what was changed and why).
 """
 import argparse
@@ -41,6 +43,9 @@ CONFIG_DEFAULT = Path(os.environ.get("AIWOS_CONFIG", "~/.config/aiwos/local.json
 # kept in the state directory, under names no config can take (see config_location_problem)
 PID_NAME, LOG_NAME, LOCK_NAME = "local-controller.pid", "local-controller.log", "local-controller.lock"
 TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
+# the first local runs: these values exactly, and only contracts under tasks/
+LOCAL_WORKERS, LOCAL_MODELS = 10, 1
+LOCAL_TASK_GLOBS = ["tasks/*.json", "tasks/*/*.json"]
 
 
 class Refused(RuntimeError):
@@ -90,6 +95,12 @@ def config_location_problem(cfgpath, cfg):
     return None
 
 
+def task_glob_ok(glob):
+    """A queue pattern that can only match contracts under tasks/."""
+    return (isinstance(glob, str) and glob.startswith("tasks/") and len(glob) > len("tasks/")
+            and "\\" not in glob and ".." not in glob.split("/") and not glob.endswith("/"))
+
+
 def local_policy(cfg):
     """What the local CLI insists on before anything can run."""
     problems = []
@@ -97,6 +108,14 @@ def local_policy(cfg):
         problems.append(f"publish={cfg.get('publish')!r}: the local CLI runs with publish=none only")
     if cfg.get("require_isolation") is not True:
         problems.append("require_isolation must be true")
+    if cfg.get("workers") != LOCAL_WORKERS:
+        problems.append(f"workers={cfg.get('workers')!r}: the local CLI runs with exactly {LOCAL_WORKERS}")
+    if cfg.get("model_concurrency") != LOCAL_MODELS:
+        problems.append(f"model_concurrency={cfg.get('model_concurrency')!r}: the local CLI runs with exactly "
+                        f"{LOCAL_MODELS}")
+    globs = cfg.get("task_globs")
+    if not isinstance(globs, list) or not globs or not all(task_glob_ok(g) for g in globs):
+        problems.append(f"task_globs={globs!r}: only patterns under tasks/ are allowed")
     if Path(cfg.get("code_dir") or ROOT).resolve() != ROOT:
         problems.append(f"code_dir {cfg.get('code_dir')} is not this CLI's checkout {ROOT}")
     if not cfg.get("agent_user") or not cfg.get("agent_group"):
@@ -222,8 +241,9 @@ def cmd_init(args):
     cfg = {**DEFAULTS}
     cfg.update(repo_dir=str(repo), state_dir=str(Path(args.state_dir).expanduser().resolve()),
                workspaces_dir=str(Path(args.workspaces_dir).expanduser().resolve()), code_dir=str(ROOT),
-               agent_user=args.agent_user, agent_group=args.agent_group, workers=10, model_concurrency=1,
-               publish="none", require_isolation=True, task_globs=["tasks/*.json", "tasks/*/*.json"],
+               agent_user=args.agent_user, agent_group=args.agent_group, workers=LOCAL_WORKERS,
+               model_concurrency=LOCAL_MODELS, publish="none", require_isolation=True,
+               task_globs=list(LOCAL_TASK_GLOBS),
                credential_files=[str(Path(p).expanduser().resolve()) for p in args.credential_file],
                github_repo=args.github_repo)
     problem = config_location_problem(cfgpath, cfg)
@@ -322,12 +342,115 @@ def cmd_doctor(args):
     return 0 if ok else 1
 
 
+def _argv(pid):
+    return [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
+
+
+def _ppid(pid):
+    try:
+        return int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def config_processes(cfg):
+    """This user's processes that belong to this config, other than the
+    controller in the pid file: {pid: kind}. kind is 'controller' (one not
+    started by this CLI), 'worker', or 'stage' (a stage runner, found by the
+    lease tag in its environment; the agent side below it is reached through
+    it, sudo relaying the signal). Each process tree is listed once, by its top."""
+    me, own, registered = os.geteuid(), os.getpid(), controller_pid(cfg)
+    cfgarg = str(Path(cfg["_config_path"]).resolve())
+    worktrees = Path(cfg["state_dir"]).resolve() / "worktrees"
+    found = {}
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) in (own, registered):
+            continue
+        pid = int(entry)
+        try:
+            if os.stat(f"/proc/{pid}").st_uid != me:
+                continue
+            argv = _argv(pid)
+            for action, kind in (("run", "controller"), ("worker", "worker")):
+                expected = ["-m", "controller", action, "--config", cfgarg]
+                if any(argv[i:i + 5] == expected for i in range(len(argv) - 4)):
+                    found[pid] = kind
+                    break
+            else:
+                env = dict(item.split(b"=", 1) for item in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+                           if b"=" in item)
+                root = env.get(b"AIWOS_ROOT", b"").decode(errors="replace")
+                if b"AIWOS_LEASE_TAG" in env and root and inside(root, worktrees):
+                    found[pid] = "stage"
+        except (OSError, ValueError):
+            continue  # gone meanwhile
+    return {pid: kind for pid, kind in found.items() if _ppid(pid) not in found}
+
+
+def unsupervised(cfg):
+    """Processes of this config that the controller in the pid file does not
+    supervise: everything when it is not running (left behind by a crash: an
+    AI may still be working), otherwise only a second, foreign controller."""
+    procs = config_processes(cfg)
+    if controller_pid(cfg):
+        return {pid: kind for pid, kind in procs.items() if kind == "controller"}
+    return procs
+
+
+def describe(procs):
+    return ", ".join(f"{kind} {pid}" for pid, kind in sorted(procs.items()))
+
+
+def wait_gone(pids, seconds):
+    from controller.store import pid_alive
+    deadline = time.time() + seconds
+    while time.time() < deadline and any(pid_alive(p) for p in pids):
+        time.sleep(0.5)
+    return [p for p in pids if pid_alive(p)]
+
+
+def stop_leftovers(cfg):
+    """Stop what a crash left running for this config, the way the controller
+    stops a dead worker's stage: a controller gets SIGTERM and is waited for
+    (never SIGKILL); a worker or a stage tree gets SIGTERM/SIGINT, then SIGKILL
+    after kill_grace_s. Their leased tasks return to the queue when the next
+    controller finds the lease expired."""
+    left = unsupervised(cfg)
+    if not left:
+        return 0
+    print(f"WARNING: running without a controller: {describe(left)} (an AI stage may have been running)")
+    controllers = [pid for pid, kind in left.items() if kind == "controller"]
+    for pid in controllers:
+        os.kill(pid, signal.SIGTERM)
+    if wait_gone(controllers, cfg["kill_grace_s"] + 60):
+        return die(f"controller not started by this CLI did not stop: {controllers}; left running", 1)
+    from controller.procs import kill_tree
+    for pid, kind in unsupervised(cfg).items():
+        kill_tree(pid, grace=cfg["kill_grace_s"], first=signal.SIGINT if kind == "stage" else signal.SIGTERM)
+    remaining = unsupervised(cfg)
+    if remaining:
+        return die(f"still running, left for inspection: {describe(remaining)}", 1)
+    print(f"Stopped leftover processes: {describe(left)}")
+    return 0
+
+
+def refuse_if_busy(cfg, what):
+    pid = controller_pid(cfg)
+    if pid:
+        raise Refused(f"{what} is refused while the controller runs (PID {pid}); stop it first")
+    left = unsupervised(cfg)
+    if left:
+        raise Refused(f"{what} is refused: processes of this config are running without a controller "
+                      f"({describe(left)}); run stop first")
+
+
 def cmd_start(cfg):
     with single_operator(cfg):
         pid = controller_pid(cfg)
         if pid:
             print(f"Controller already running (PID {pid}); use status")
             return 0
+        refuse_if_busy(cfg, "start")
         boundary_check(cfg)
         if run_controller(cfg, "check-config", quiet=True) != 0:
             return die("invalid config")
@@ -360,6 +483,10 @@ def cmd_start(cfg):
 def cmd_status(cfg, raw=False):
     pid = controller_pid(cfg)
     print(f"Local controller: {'RUNNING (PID ' + str(pid) + ')' if pid else 'STOPPED'}")
+    left = unsupervised(cfg)
+    if left:
+        print(f"WARNING: running without a controller: {describe(left)}; an AI stage may still be running. "
+              f"Run stop to end them.")
     verdict = stored_isolation(cfg)
     if verdict is not None:
         print(f"Isolation: ok={verdict.get('ok')} reason={verdict.get('reason')}")
@@ -374,30 +501,30 @@ def cmd_stop(cfg):
         pidpath = paths(cfg)[0]
         pid = controller_pid(cfg)
         if pid is None:
-            pidpath.unlink(missing_ok=True)  # stale or absent: nothing of ours is running under it
-            print("Controller not running; no process was signalled")
-            return 0
-        os.kill(pid, signal.SIGTERM)
-        # the controller stops its workers and their stage processes itself; never SIGKILL it
-        deadline = time.time() + cfg["kill_grace_s"] + 60
-        while time.time() < deadline:
-            if controller_pid(cfg) is None:
-                pidpath.unlink(missing_ok=True)
-                print("Controller stopped")
-                return 0
-            time.sleep(0.5)
-        return die("stop timed out; the process was left running for inspection", 1)
+            print("Controller not running; no controller was signalled")
+        else:
+            os.kill(pid, signal.SIGTERM)
+            # the controller stops its workers and their stage processes itself; never SIGKILL it
+            if wait_gone([pid], cfg["kill_grace_s"] + 60) and controller_pid(cfg):
+                return die("stop timed out; the controller was left running for inspection", 1)
+            print("Controller stopped")
+        pidpath.unlink(missing_ok=True)
+        # a worker killed outright leaves its stage (and the AI under it) running
+        # even after a clean controller shutdown, until the stage's own timeout
+        return stop_leftovers(cfg)
 
 
 def cmd_sync(cfg):
-    boundary_check(cfg)  # sync checks the AI CLI logins as the agent user
-    return run_controller(cfg, "sync-once")
+    # the running controller fetches and updates its worktrees itself (every
+    # sync_interval_s); a second git writer on the same clone would race it
+    with single_operator(cfg):
+        refuse_if_busy(cfg, "sync")
+        boundary_check(cfg)  # sync checks the AI CLI logins as the agent user
+        return run_controller(cfg, "sync-once")
 
 
 def cmd_review(cfg, task):
     with single_operator(cfg):
-        if controller_pid(cfg):
-            return die("review is refused while the controller runs (two writers on one task)")
         repo = Path(cfg["repo_dir"]).resolve()
         source = (Path(task) if Path(task).is_absolute() else repo / task).resolve()
         if not source.is_relative_to(repo) or not source.is_file() or source.suffix != ".json":
@@ -405,6 +532,7 @@ def cmd_review(cfg, task):
         rel = source.relative_to(repo).as_posix()
         if not any(fnmatch.fnmatchcase(rel, g) for g in cfg["task_globs"]):
             return die(f"{rel} is not one of this queue's tasks (task_globs {cfg['task_globs']})")
+        refuse_if_busy(cfg, "review")  # two writers on one task
         boundary_check(cfg)
         from controller.worker import stage_env
         env = {k: v for k, v in stage_env(cfg, repo, 0).items() if k not in TOKEN_ENV}

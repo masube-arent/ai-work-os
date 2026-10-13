@@ -20,11 +20,11 @@ WSL2 Ubuntu
 |---|---|---|
 | `init` | 設定を作る（publish=none、require_isolation=true、ワーカー 10、モデル 1、対象は `tasks/` だけ）。既存の設定は上書きしない | しない |
 | `doctor` | 環境・設定・隔離・WSL の穴・sudo 規則・AI CLI のログイン状態を確認する | しない（ログイン状態の確認だけ） |
-| `start` | 隔離の検査（agent ユーザーとして実行）に通ったときだけ Controller を起動する | 待ち行列にタスクがあれば、隔離確認後に起動する |
-| `status` | Controller・ワーカー・モデル枠・隔離の判定・タスクを表示する | しない |
-| `stop` | 起動した Controller だと確かめてから SIGTERM を送り、終了を待つ。SIGKILL はしない | しない |
-| `sync` | GitHub（データ用 clone の remote）から契約を 1 回取り込む。隔離の検査が必要 | しない |
-| `review TASK` | 契約で指定されたレビュアーを 1 回実行する。Controller の停止中だけ | する（隔離確認後） |
+| `start` | 隔離の検査（agent ユーザーとして実行）に通ったときだけ Controller を起動する。この設定のプロセスが Controller なしで残っていれば起動しない（先に `stop`） | 待ち行列にタスクがあれば、隔離確認後に起動する |
+| `status` | Controller・ワーカー・モデル枠・隔離の判定・タスクを表示する。Controller なしで残っているプロセスがあれば警告する | しない |
+| `stop` | 起動した Controller だと確かめてから SIGTERM を送り、終了を待つ（Controller には SIGKILL しない）。続けて、異常終了で残ったこの設定のワーカーと段階のプロセス（その下の AI を含む）を止める | しない |
+| `sync` | データ用 clone の remote から契約を 1 回取り込む。隔離の検査が必要。Controller の稼働中・残留プロセスがあるときは拒否する（Controller 自身が `sync_interval_s` ごとに同期するため、Git の操作が競合しないように） | しない |
+| `review TASK` | 契約で指定されたレビュアーを 1 回実行する。Controller の停止中で、残留プロセスが無いときだけ | する（隔離確認後） |
 
 ## 安全条件（初回の動作条件）
 
@@ -39,8 +39,24 @@ WSL2 Ubuntu
 
   隔離の検査は、WSL のときこの 2 つが無効であることも確かめる（`controller/wsl.py`）。
 - **root と agent ユーザーでは動かない。** CLI は Controller 用ユーザー（aiwos-ctl）でだけ動く。
-- **対象はダミータスクだけ。** `init` の対象は `tasks/` だけで、`examples/` は自動実行しない。実案件は扱わない。
+- **ワーカー 10・モデル同時実行 1・対象は `tasks/` だけ。** 設定がこの値から外れていれば、`start` / `sync` / `review` は
+  何もせずに止まる（`task_globs` は `tasks/` で始まり `..` を含まないパターンだけを許す）。`examples/` は自動実行しない。
+- **対象はダミータスクだけ。** 実案件は扱わない。
+- **start / stop / sync / review は 1 つずつ。** state ディレクトリのロックで直列にする。
 - **常駐・自動起動はしない。** systemd・タスクスケジューラへの登録はしない。PC のスリープ・シャットダウンで止まる。
+
+## 異常終了したときの扱い
+
+| 状況 | 何が残るか（コンテナで確認） | CLI の扱い |
+|---|---|---|
+| Controller だけが強制終了 | ワーカーは Controller の消滅を検知し、実行中の段階（AI を含む）をプロセスツリーごと止めてから終わる。数秒で何も残らない | `status` は STOPPED。`start` で再開できる |
+| ワーカーだけが強制終了（Controller は稼働中） | 段階のランナーと AI が残る。Controller は次の起動時か、リースの期限切れ後に片付ける | `stop` は Controller を止めたあと、残ったランナーと AI も止める |
+| ワーカーと Controller が同時に強制終了（電源断に近い） | 段階のランナーと AI が、段階のタイムアウト（既定 900 秒）まで監督なしで動き続ける | `status` が警告し、`start` / `sync` / `review` は拒否する。`stop` がそれらを止める（ランナーに SIGINT → AI 側へ中継 → 猶予後に SIGKILL）。そのタスクは、次の Controller がリースの期限切れを確認してから待ち行列に戻す |
+
+残ったプロセスは、この設定のファイルパスを含むコマンド行（ワーカー）と、段階のプロセスの環境変数
+（`AIWOS_LEASE_TAG` と、この設定の `worktrees/` を指す `AIWOS_ROOT`）で見分ける。agent ユーザーの AI プロセスは
+Controller 用ユーザーから直接は止められないため、その上のランナーを止め、sudo がシグナルを AI 側へ中継する。
+WSL ごと止まった場合（`wsl --shutdown`、PC の電源断）は、すべてのプロセスが一緒に止まる。
 
 ## ZIP（aiwos-local-cli.zip）の監査結果
 
@@ -116,11 +132,10 @@ sudo apt install -y git python3 python3-jsonschema sudo ca-certificates curl
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
 sudo apt install -y nodejs
 sudo npm install -g @anthropic-ai/claude-code @openai/codex
-sudo -u aiwos-agent -H sh -c 'command -v claude codex'   # 例: /usr/bin/claude /usr/bin/codex
+command -v claude codex   # 例: /usr/bin/claude /usr/bin/codex（/usr/bin か /usr/local/bin であること）
 ```
 
-`sudo` は PATH を `secure_path` に置き換えるため、claude / codex は `/usr/bin` か `/usr/local/bin` に入っている必要がある
-（`doctor` が `CLI not found` と出したら、ここを見直す。別の場所なら設定の `agent_bins` で絶対パスを指定する）。
+この時点では aiwos-ctl / aiwos-agent はまだ無い。`sudo -u aiwos-...` を使うのは手順 4 でユーザーを作った後。
 
 ### 4. 信頼済みコードを置く（root 所有、ほかのユーザーは書き込めない）
 
@@ -129,7 +144,12 @@ sudo git clone https://github.com/masube-arent/ai-work-os.git /opt/aiwos/code
 sudo git -C /opt/aiwos/code checkout feature/local-cli     # main に取り込まれるまではこのブランチ
 sudo chown -R root:root /opt/aiwos/code
 sudo bash /opt/aiwos/code/deploy/isolation/setup.sh /opt/aiwos/code   # aiwos-ctl / aiwos-agent / aiwos-ws と sudo 規則
+id aiwos-ctl && id aiwos-agent                                        # 両方のユーザーができたことを確認
+sudo -u aiwos-agent -H sh -c 'command -v claude codex'                # agent ユーザーから AI CLI が見えること
 ```
+
+`sudo` は PATH を `secure_path` に置き換えるため、claude / codex は `/usr/bin` か `/usr/local/bin` に入っている必要がある
+（`doctor` が `CLI not found` と出したら、ここを見直す。別の場所なら設定の `agent_bins` で絶対パスを指定する）。
 
 ### 5. データ用の場所とダミータスク（ローカルだけの remote。GitHub には何も送らない）
 
@@ -194,16 +214,30 @@ EOF
 その後 PowerShell で `start` → `status` を見る。Claude Code が `tasks/DUMMY-0001/out.txt` を書き、検査コマンド、
 Codex のレビュー、判定と進む。publish=none のため結果は GitHub に送られない。終わったら `stop`。
 
+## GPT / ChatGPT レビューへの対応（2026-10-13）
+
+| # | 指摘 | 対応 |
+|---|---|---|
+| 1 | `local_policy()` にワーカー 10・モデル 1・`tasks/` 配下だけの検査がない | 追加。外れていれば start / sync / review は何もせずに止まる |
+| 2 | sync と稼働中 Controller の Git 操作の競合 | sync を state のロックで直列にし、Controller の稼働中・残留プロセスがあるときは拒否 |
+| 3 | 手順書で aiwos-agent を作る前に `sudo -u aiwos-agent` を実行している | 手順 3 から手順 4（setup.sh の後）へ移した。順序をテストで固定 |
+| 4 | Controller の異常終了中に AI が動いていた場合の stop | 再現した: ワーカーと Controller が同時に止まると AI が残り、stop は何もしなかった。残留プロセスの検出・警告・停止を追加（「異常終了したときの扱い」） |
+
+あわせて見つけた不具合: ダミー契約の履歴の時刻が未来（2026-10-13T00:00Z）で、それより前の時計ではランナーが
+「時刻が逆行している」と拒否していた。過去の時刻に直した。
+
 ## 検証の範囲（2026-10-13）
 
 | 項目 | 結果 | 環境 |
 |---|---|---|
-| CLI の単体テスト（設定・PID・停止・レビューの経路・root 拒否・WSL 判定・require_isolation・ラッパー） | 21 件合格 | Linux コンテナ |
+| CLI の単体テスト（設定・PID・停止・レビューの経路・root 拒否・WSL 判定・require_isolation・ラッパー・ワーカー数/モデル数/task_globs の強制・sync のロックと稼働中の拒否・残留プロセスの検出と停止・手順書の順序） | 29 件合格 | Linux コンテナ |
 | aiwos-ctl / aiwos-agent を使った結合テスト（init → sync → start → status → 二重起動の防止 → Controller の強制終了 → ワーカーの消滅 → 再起動で 10 ワーカー → stop で全プロセス終了） | 合格 | Linux コンテナ（実際の sudo 規則と隔離の検査） |
 | agent から読める認証情報ファイルがあるとき、`start` と `sync` が AI を起動せずに止まる | 合格 | 同上 |
+| 稼働中の Controller があるとき `sync` を拒否する | 合格 | 同上 |
+| AI の段階の実行中にワーカーと Controller を同時に強制終了 → AI が残ることを確認 → `status` が警告、`start` / `sync` を拒否 → `stop` で AI 側のプロセスまで 0 になる（stub の AI CLI、モデル呼び出しなし） | 合格 | 同上 |
 | `aiwos.ps1` の構文と引数の受け渡し（`; rm -rf /` を含む引数が 1 つの引数のまま届く、UTF-16 の一覧、存在しない名前の拒否、終了コード） | 合格 | Linux 上の PowerShell 7.4 と偽の `wsl.exe` |
 | この手順の 5〜8 の Linux 部分（実際のパス `/var/lib/aiwos/...`、`aiwos` ラッパー）: init → doctor → start → ダミータスクの投入 → status。AI CLI が使えない状態ではタスクは `queued`・`ai_runs=0` のままで、agent ユーザーのプロセスは 0 | 合格 | Linux コンテナ |
-| 安全チェックを 1 つずつ外す改変（require_isolation、WSL の判定、PID ファイル名、起動時刻の照合、start 前の検査）がテストで検出されること | 5/5 検出 | Linux コンテナ |
+| 安全チェックを 1 つずつ外す改変（require_isolation、WSL の判定、PID ファイル名、起動時刻の照合、start 前の検査、ワーカー数、モデル数、task_globs、稼働中の sync、sync のロック、stop の残留プロセス停止、残留プロセスがあるときの start）がテストで検出されること | 12/12 検出 | Linux コンテナ |
 
 **未検証（実機の Windows / WSL2 が必要）**
 
@@ -214,6 +248,7 @@ Codex のレビュー、判定と進む。publish=none のため結果は GitHub
 - `[boot] command` による `fs.protected_hardlinks=1` の設定
 - WSL 内での Claude Code / Codex のサブスクリプションログイン（agent ユーザー）と、実際のモデル実行
 - `review` コマンドで契約のレビュアーを実際に動かすこと（経路の拒否条件だけをテストした）
+- 残留プロセスの停止は、AI 側に stub を使って確認した。本物の Claude Code / Codex が SIGTERM を受けたときの終わり方は未確認
 - `wsl.exe` が戻ったあとも Controller が動き続けるか（WSL がアイドル時にディストリビューションを止める場合がある）。
   止まった場合も、次の `start` で古いワーカーと PID ファイルは安全に扱われる（コンテナで確認済み）
 - PC のスリープ・休止・シャットダウン後の挙動、長時間の運転

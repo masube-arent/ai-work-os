@@ -74,7 +74,7 @@
     {
       "from": "draft",
       "to": "ready",
-      "at": "2026-10-13T00:00:00Z",
+      "at": "2026-10-12T00:00:00Z",
       "by": "claude-code",
       "note": "local CLI dummy task (no real project); copy to tasks/DUMMY-0001/task.json of a local-only data repo"
     }

@@ -54,7 +54,8 @@ class Tmp(unittest.TestCase):
         self.addCleanup(lambda: shutil.rmtree(self.d, ignore_errors=True))
 
     def cfg(self, **kw):
-        cfg = {"state_dir": str(self.d / "state"), "workspaces_dir": str(self.d / "ws"),
+        cfg = {"state_dir": str(self.d / "state"), "workspaces_dir": str(self.d / "ws"), "workers": 10,
+               "model_concurrency": 1,
                "repo_dir": str(self.d / "repo"), "code_dir": str(ROOT), "_config_path": str(self.d / "local.json"),
                "publish": "none", "require_isolation": True, "agent_user": "nobody-agent",
                "agent_group": "nobody-group", "task_globs": ["tasks/*.json", "tasks/*/*.json"], "kill_grace_s": 1}
@@ -129,6 +130,24 @@ class ConfigAndPidFiles(Tmp):
         self.assertTrue(cli.local_policy(self.cfg(agent_user=cli.current_user())))
         self.assertTrue(cli.local_policy(self.cfg(code_dir=str(self.d))))  # scripts from another checkout
 
+    def test_local_policy_insists_on_10_workers_1_model_and_tasks_only(self):
+        for bad in (dict(workers=9), dict(workers=1), dict(model_concurrency=2), dict(model_concurrency=0)):
+            self.assertTrue(cli.local_policy(self.cfg(**bad)), bad)
+        for globs in ([], "tasks/*.json", ["examples/*/task*.json"], ["tasks/*.json", "examples/*/task*.json"],
+                      ["tasks/../examples/x.json"], ["/etc/*.json"], ["tasks/"], ["tasks\\*.json"], ["*.json"],
+                      ["tasksX/*.json"], [None]):
+            self.assertTrue(cli.local_policy(self.cfg(task_globs=globs)), globs)
+        self.assertEqual(cli.local_policy(self.cfg(task_globs=["tasks/DUMMY-0001/task.json"])), [])
+
+    def test_start_sync_and_review_refuse_a_config_outside_the_local_policy(self):
+        with mock.patch("controller.main.refresh_isolation", side_effect=AssertionError("probe must not run")), \
+                mock.patch.object(cli, "unsupervised", return_value={}), \
+                mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("nothing may start")):
+            for bad in (self.cfg(workers=3), self.cfg(model_concurrency=2), self.cfg(task_globs=["examples/*.json"])):
+                for cmd in (cli.cmd_start, cli.cmd_sync):
+                    with self.assertRaises(cli.Refused):
+                        cmd(bad)
+
     def test_boundary_check_refuses_before_any_probe(self):
         with mock.patch("controller.main.refresh_isolation", side_effect=AssertionError("probe must not run")):
             for bad in (self.cfg(publish="git"), self.cfg(agent_user=None, agent_group=None)):
@@ -173,7 +192,7 @@ class ProcessSafety(Tmp):
         with mock.patch.object(cli.os, "kill", side_effect=AssertionError("must not signal")):
             code, out, _ = quiet(cli.cmd_stop, cfg)
         self.assertEqual(code, 0)
-        self.assertIn("no process was signalled", out)
+        self.assertIn("no controller was signalled", out)
         self.assertFalse(cli.paths(cfg)[0].exists())  # the stale pid file is gone
 
     def test_stop_signals_the_verified_controller_and_waits(self):
@@ -192,6 +211,87 @@ class ProcessSafety(Tmp):
         self.assertEqual(code, 0, err)
         self.assertIn("Controller stopped", out)
         self.assertEqual(proc.wait(timeout=10), -signal.SIGTERM)  # SIGTERM, not SIGKILL
+
+    def stand_in(self, env=None, argv=None):
+        proc = subprocess.Popen(argv or [sys.executable, "-c", "import time; time.sleep(60)"],
+                                env={**os.environ, **(env or {})})
+        self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait()))
+        for _ in range(50):
+            if cli.process_start_ticks(proc.pid):
+                break
+            time.sleep(0.05)
+        return proc
+
+    def test_finds_workers_and_stage_runners_of_this_config_only(self):
+        cfg = self.cfg()
+        wt = Path(cfg["state_dir"]) / "worktrees" / "w01"
+        wt.mkdir(parents=True)
+        worker = self.stand_in(argv=[sys.executable, "-c", "import time; time.sleep(60)", "-m", "controller",
+                                     "worker", "--config", cfg["_config_path"], "--id", "1"])
+        stage = self.stand_in(env={"AIWOS_LEASE_TAG": "T-1:1", "AIWOS_ROOT": str(wt)})
+        other_cfg = self.stand_in(argv=[sys.executable, "-c", "import time; time.sleep(60)", "-m", "controller",
+                                        "worker", "--config", str(self.d / "other.json"), "--id", "1"])
+        other_stage = self.stand_in(env={"AIWOS_LEASE_TAG": "T-9:9", "AIWOS_ROOT": str(self.d / "elsewhere")})
+        found = cli.config_processes(cfg)
+        self.assertEqual(found.get(worker.pid), "worker")
+        self.assertEqual(found.get(stage.pid), "stage")
+        self.assertNotIn(other_cfg.pid, found)
+        self.assertNotIn(other_stage.pid, found)
+        self.assertEqual(cli.unsupervised(cfg), found)  # no controller in the pid file: all of it is unsupervised
+
+    def test_stop_ends_leftovers_stage_first_with_sigint(self):
+        cfg = self.cfg()
+        left = {101: "stage", 102: "worker"}
+        calls = []
+        with mock.patch.object(cli, "unsupervised", side_effect=[left, left, {}]), \
+                mock.patch("controller.procs.kill_tree", side_effect=lambda pid, grace, first: calls.append((pid, first))):
+            code, out, err = quiet(cli.cmd_stop, cfg)
+        self.assertEqual(code, 0, err)
+        self.assertIn("WARNING: running without a controller", out)
+        self.assertEqual(sorted(calls), [(101, signal.SIGINT), (102, signal.SIGTERM)])
+
+    def test_stop_reports_what_it_could_not_end(self):
+        cfg = self.cfg()
+        left = {101: "stage"}
+        with mock.patch.object(cli, "unsupervised", return_value=left), \
+                mock.patch("controller.procs.kill_tree"):
+            code, _, err = quiet(cli.cmd_stop, cfg)
+        self.assertEqual(code, 1)
+        self.assertIn("left for inspection", err)
+
+    def test_status_warns_about_unsupervised_processes(self):
+        cfg = self.cfg()
+        with mock.patch.object(cli, "unsupervised", return_value={4242: "stage"}):
+            code, out, _ = quiet(cli.cmd_status, cfg)
+        self.assertIn("WARNING: running without a controller: stage 4242", out)
+
+    def test_sync_waits_for_the_operator_lock_and_refuses_beside_a_controller(self):
+        import fcntl
+        import threading
+        cfg = self.cfg()
+        Path(cfg["state_dir"]).mkdir(parents=True)
+        # refused while a controller runs: no probe, no git
+        with mock.patch.object(cli, "controller_pid", return_value=4242), \
+                mock.patch.object(cli, "boundary_check", side_effect=AssertionError("no probe")), \
+                mock.patch.object(cli, "run_controller", side_effect=AssertionError("no git")):
+            with self.assertRaisesRegex(cli.Refused, "sync is refused while the controller runs"):
+                cli.cmd_sync(cfg)
+        # serialised with start/stop/review through the operator lock
+        done = threading.Event()
+        lock = os.open(str(cli.paths(cfg)[2]), os.O_CREAT | os.O_RDWR, 0o600)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            with mock.patch.object(cli, "unsupervised", return_value={}), \
+                    mock.patch.object(cli, "boundary_check"), \
+                    mock.patch.object(cli, "run_controller", side_effect=lambda *a, **k: done.set() or 0):
+                t = threading.Thread(target=cli.cmd_sync, args=(cfg,))
+                t.start()
+                self.assertFalse(done.wait(0.7))  # blocked behind the lock
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                self.assertTrue(done.wait(10))
+                t.join(10)
+        finally:
+            os.close(lock)
 
     def test_status_without_a_database_has_no_side_effect(self):
         cfg = self.cfg()
@@ -310,6 +410,14 @@ class Wrappers(unittest.TestCase):
         self.assertEqual(sorted(re.findall(r"'(\w+)'", commands)),
                          sorted(["init", "doctor", "start", "status", "stop", "sync", "review"]))
 
+    def test_guide_creates_the_users_before_running_anything_as_them(self):
+        lines = (ROOT / "docs" / "local-cli.md").read_text().splitlines()
+        setup = next(i for i, l in enumerate(lines) if "sudo bash" in l and "deploy/isolation/setup.sh" in l)
+        as_users = [i for i, l in enumerate(lines) if re.search(r"sudo -u aiwos-(agent|ctl)", l)]
+        self.assertTrue(as_users)
+        early = [lines[i] for i in as_users if i < setup]
+        self.assertEqual(early, [], "sudo -u aiwos-* before setup.sh creates the users")
+
     def test_linux_wrapper_runs_the_cli(self):
         r = subprocess.run([str(ROOT / "aiwos"), "--help"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -341,10 +449,33 @@ def as_ctl(argv, **kw):
 
 PROBLEM = environment_problem()
 
+# plays claude and codex: logged in, and a work stage that never finishes on its own
+SLOW_STUB = """#!/usr/bin/env python3
+import json, os, sys, time
+cli = os.path.basename(__file__).split("-")[-1]
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("0 (stub " + cli + ")"); sys.exit(0)
+if cli == "claude" and args[:2] == ["auth", "status"]:
+    print(json.dumps({"loggedIn": True, "authMethod": "oauth_token", "apiProvider": "firstParty"})); sys.exit(0)
+if cli == "codex" and args[:2] == ["login", "status"]:
+    print("Logged in using ChatGPT"); sys.exit(0)
+sys.stdin.read()
+time.sleep(600)
+"""
+
 
 @unittest.skipIf(PROBLEM, PROBLEM or "")
 class LocalCliIsolated(unittest.TestCase):
     def setUp(self):
+        self.build()
+
+    def build(self, dummy_task=False):
+        """A local bare remote and a data clone; with dummy_task, the dummy
+        contract is queued and the agent CLIs are stubs (no model) whose work
+        stage just sleeps, standing in for an AI that is still working."""
+        if getattr(self, "tmp", None):
+            shutil.rmtree(self.tmp, ignore_errors=True)
         self.tmp = Path(tempfile.mkdtemp(prefix="aiwos-lcli-iso-"))
         os.chmod(self.tmp, 0o755)
         self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
@@ -352,6 +483,15 @@ class LocalCliIsolated(unittest.TestCase):
         git(self.tmp, "init", "-q", "--bare", "-b", "main", str(bare))
         (seed / "tasks").mkdir(parents=True)
         (seed / "tasks" / ".keep").write_text("")
+        if dummy_task:
+            (seed / "tasks" / "DUMMY-0001").mkdir()
+            shutil.copy(ROOT / "examples" / "local-cli" / "dummy-task.json", seed / "tasks" / "DUMMY-0001" / "task.json")
+            bins = self.tmp / "bin"
+            bins.mkdir()
+            for cli_name in ("claude", "codex"):
+                (bins / f"stub-{cli_name}").write_text(SLOW_STUB)
+                (bins / f"stub-{cli_name}").chmod(0o755)
+            self.bins = bins
         git(seed, "init", "-q", "-b", "main")
         git(seed, "add", "-A")
         git(seed, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "seed")
@@ -362,9 +502,19 @@ class LocalCliIsolated(unittest.TestCase):
         pw = pwd.getpwnam(CTL)
         for d in ("remote.git", "repo", "state", "ws"):
             subprocess.run(["chown", "-R", f"{pw.pw_uid}:{pw.pw_gid}", str(self.tmp / d)], check=True)
-        self.config = Path(pw.pw_dir) / f"test-local-{secrets.token_hex(4)}.json"
-        self.addCleanup(lambda: self.config.unlink(missing_ok=True))
-        self.addCleanup(self.kill_leftovers)
+        if getattr(self, "config", None) is None:
+            self.config = Path(pw.pw_dir) / f"test-local-{secrets.token_hex(4)}.json"
+            self.addCleanup(lambda: self.config.unlink(missing_ok=True))
+            self.addCleanup(self.kill_leftovers)
+        self.config.unlink(missing_ok=True)
+
+    def use_stubs(self):
+        """Point the config at the stub CLIs and make the controller quick (as root,
+        keeping the file the controller user's, mode 0600)."""
+        data = json.loads(self.config.read_text())
+        data.update(agent_bins={"claude": str(self.bins / "stub-claude"), "codex": str(self.bins / "stub-codex")},
+                    poll_interval_s=0.5, sync_interval_s=5, heartbeat_s=2, lease_ttl_s=30, kill_grace_s=5)
+        self.config.write_text(json.dumps(data))
 
     def cli(self, *args, **kw):
         return as_ctl(["/usr/bin/python3", str(ROOT / "scripts" / "aiwos-local.py"), "--config", str(self.config),
@@ -395,6 +545,18 @@ class LocalCliIsolated(unittest.TestCase):
                     os.kill(pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+        subprocess.run(["pkill", "-KILL", "-u", AGENT], capture_output=True)
+        subprocess.run(["pkill", "-KILL", "-u", CTL, "-f", "scripts/aiwos.py run"], capture_output=True)
+
+    @staticmethod
+    def agent_procs():
+        r = subprocess.run(["pgrep", "-u", AGENT], capture_output=True, text=True)
+        return [int(p) for p in r.stdout.split()]
+
+    @staticmethod
+    def stage_runners():
+        r = subprocess.run(["pgrep", "-u", CTL, "-f", "scripts/aiwos.py run"], capture_output=True, text=True)
+        return [int(p) for p in r.stdout.split()]
 
     def test_start_status_stop_and_restart_after_a_crash(self):
         self.init()
@@ -412,9 +574,12 @@ class LocalCliIsolated(unittest.TestCase):
         # a second start does not start a second controller
         self.cli("start")
         self.assertEqual(len(self.procs("run")), 1)
-        # review is refused while the controller runs
+        # review needs an existing contract; sync is refused while the controller runs
         r = self.cli("review", "tasks/x/task.json")
         self.assertEqual(r.returncode, 2)
+        r = self.cli("sync")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("sync is refused while the controller runs", r.stderr)
 
         # crash: the controller is killed outright; its workers must not live on
         os.kill(self.procs("run")[0], signal.SIGKILL)
@@ -443,6 +608,40 @@ class LocalCliIsolated(unittest.TestCase):
         self.assertEqual(self.procs("worker"), [])
         r = self.cli("sync")
         self.assertEqual(r.returncode, 1)
+
+    def test_stop_ends_an_ai_stage_left_running_by_a_crash(self):
+        self.build(dummy_task=True)
+        self.init()
+        self.use_stubs()
+        r = self.cli("start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(self.wait_for(lambda: self.agent_procs() and self.stage_runners(), 120),
+                        "the stub agent never started")
+        runner = self.stage_runners()[0]
+        worker = cli._ppid(runner)
+        # power-cut-like: the worker and the controller die at once, the AI stage does not
+        os.kill(worker, signal.SIGKILL)
+        os.kill(self.procs("run")[0], signal.SIGKILL)
+        time.sleep(3)
+        self.assertTrue(self.agent_procs(), "precondition: the AI stage outlived its controller")
+
+        r = self.cli("status")
+        self.assertIn("STOPPED", r.stdout)
+        self.assertIn("WARNING: running without a controller", r.stdout)
+        for cmd in ("start", "sync"):  # nothing new starts beside an unsupervised AI
+            r = self.cli(cmd)
+            self.assertEqual(r.returncode, 1, cmd)
+            self.assertIn("run stop first", r.stderr)
+        self.assertEqual(self.procs("run"), [])
+
+        r = self.cli("stop")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("WARNING: running without a controller", r.stdout)
+        self.assertIn("Stopped leftover processes", r.stdout)
+        self.assertTrue(self.wait_for(lambda: not self.agent_procs() and not self.stage_runners(), 30),
+                        f"left: agent {self.agent_procs()} runners {self.stage_runners()}")
+        r = self.cli("status")
+        self.assertNotIn("WARNING", r.stdout)
 
     def test_doctor_reports_without_starting_anything(self):
         self.init()

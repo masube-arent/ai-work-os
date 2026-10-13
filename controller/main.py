@@ -64,6 +64,10 @@ def sync(cfg, store):
         except (ValueError, KeyError, gitops.GitError) as exc:
             store.event("sync_skipped", detail={"path": path, "error": str(exc)[:200]})
             continue
+        if not config_mod.task_allowed(cfg, task_id):  # never queued, so never run
+            store.event("sync_skipped", detail={"path": path, "error": f"task_id {str(task_id)[:60]!r} is not in "
+                                                                      f"allowed_task_ids"})
+            continue
         if task_id in seen:
             store.event("sync_duplicate", task_id=task_id, detail={"path": path, "first": seen[task_id]})
             continue

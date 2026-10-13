@@ -17,8 +17,11 @@ user. No GitHub Actions, no VPS, no API keys: the AI CLIs use the agent user's
 own subscription logins. Every command that can start an AI first proves the
 OS isolation (scripts/isolation.py probe, plus the WSL checks in
 controller/wsl.py) and refuses otherwise. The local CLI only runs with
-publish=none, require_isolation=true, 10 workers, 1 model slot and contracts
-under tasks/; start, stop, sync and review take one lock per state directory. Based on the audited
+publish=none, require_isolation=true, 10 workers, 1 model slot and, for the
+real-PC smoke test, only the dummy contract (tasks/DUMMY-0001/task.json with
+task_id DUMMY-0001: path and id both checked, also by the controller through
+allowed_task_ids); start, stop, sync and review take one lock per state
+directory. Based on the audited
 aiwos-local-cli.zip (docs/local-cli.md lists what was changed and why).
 """
 import argparse
@@ -27,6 +30,7 @@ import fnmatch
 import json
 import os
 import pwd
+import select
 import signal
 import sqlite3
 import subprocess
@@ -34,6 +38,7 @@ import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -43,9 +48,12 @@ CONFIG_DEFAULT = Path(os.environ.get("AIWOS_CONFIG", "~/.config/aiwos/local.json
 # kept in the state directory, under names no config can take (see config_location_problem)
 PID_NAME, LOG_NAME, LOCK_NAME = "local-controller.pid", "local-controller.log", "local-controller.lock"
 TOKEN_ENV = ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN")
-# the first local runs: these values exactly, and only contracts under tasks/
+# the first local runs (real-PC smoke test): these values exactly, and only the
+# dummy contract, matched by its path and by its task id
 LOCAL_WORKERS, LOCAL_MODELS = 10, 1
-LOCAL_TASK_GLOBS = ["tasks/*.json", "tasks/*/*.json"]
+SMOKE_TASK_ID = "DUMMY-0001"
+LOCAL_TASK_GLOBS = [f"tasks/{SMOKE_TASK_ID}/task.json"]
+LOCAL_ALLOWED_TASK_IDS = [SMOKE_TASK_ID]
 
 
 class Refused(RuntimeError):
@@ -95,12 +103,6 @@ def config_location_problem(cfgpath, cfg):
     return None
 
 
-def task_glob_ok(glob):
-    """A queue pattern that can only match contracts under tasks/."""
-    return (isinstance(glob, str) and glob.startswith("tasks/") and len(glob) > len("tasks/")
-            and "\\" not in glob and ".." not in glob.split("/") and not glob.endswith("/"))
-
-
 def local_policy(cfg):
     """What the local CLI insists on before anything can run."""
     problems = []
@@ -113,9 +115,11 @@ def local_policy(cfg):
     if cfg.get("model_concurrency") != LOCAL_MODELS:
         problems.append(f"model_concurrency={cfg.get('model_concurrency')!r}: the local CLI runs with exactly "
                         f"{LOCAL_MODELS}")
-    globs = cfg.get("task_globs")
-    if not isinstance(globs, list) or not globs or not all(task_glob_ok(g) for g in globs):
-        problems.append(f"task_globs={globs!r}: only patterns under tasks/ are allowed")
+    if cfg.get("task_globs") != LOCAL_TASK_GLOBS:
+        problems.append(f"task_globs={cfg.get('task_globs')!r}: the smoke test queues only {LOCAL_TASK_GLOBS}")
+    if cfg.get("allowed_task_ids") != LOCAL_ALLOWED_TASK_IDS:
+        problems.append(f"allowed_task_ids={cfg.get('allowed_task_ids')!r}: the smoke test runs only "
+                        f"{LOCAL_ALLOWED_TASK_IDS}")
     if Path(cfg.get("code_dir") or ROOT).resolve() != ROOT:
         problems.append(f"code_dir {cfg.get('code_dir')} is not this CLI's checkout {ROOT}")
     if not cfg.get("agent_user") or not cfg.get("agent_group"):
@@ -179,6 +183,8 @@ def controller_pid(cfg):
         expected = ["-m", "controller", "run", "--config", cfgarg]
         if not any(argv[i:i + 5] == expected for i in range(len(argv) - 4)):
             return None
+        if os.readlink(f"/proc/{pid}/cwd") != str(ROOT) or process_start_ticks(pid) != record["start_ticks"]:
+            return None  # not run from this checkout, or replaced while being read
         if cfgarg != str(Path(cfg["_config_path"]).resolve()):
             return None
         return pid
@@ -243,7 +249,7 @@ def cmd_init(args):
                workspaces_dir=str(Path(args.workspaces_dir).expanduser().resolve()), code_dir=str(ROOT),
                agent_user=args.agent_user, agent_group=args.agent_group, workers=LOCAL_WORKERS,
                model_concurrency=LOCAL_MODELS, publish="none", require_isolation=True,
-               task_globs=list(LOCAL_TASK_GLOBS),
+               task_globs=list(LOCAL_TASK_GLOBS), allowed_task_ids=list(LOCAL_ALLOWED_TASK_IDS),
                credential_files=[str(Path(p).expanduser().resolve()) for p in args.credential_file],
                github_repo=args.github_repo)
     problem = config_location_problem(cfgpath, cfg)
@@ -263,7 +269,8 @@ def cmd_init(args):
         os.replace(tmp, cfgpath)
     finally:
         tmp.unlink(missing_ok=True)
-    print(f"Config created: {cfgpath} (publish=none, require_isolation=true, workers=10, models=1)")
+    print(f"Config created: {cfgpath} (publish=none, require_isolation=true, workers=10, models=1, "
+          f"tasks: {SMOKE_TASK_ID} only)")
     print("Next: doctor, then start. No AI runs until the isolation probe passes.")
     return 0
 
@@ -312,7 +319,8 @@ def cmd_doctor(args):
     for problem in local_policy(cfg):
         line("NG", problem)
     print(f"  publish={cfg['publish']} require_isolation={cfg['require_isolation']} workers={cfg['workers']} "
-          f"models={cfg['model_concurrency']} task_globs={cfg['task_globs']}")
+          f"models={cfg['model_concurrency']} task_globs={cfg['task_globs']} "
+          f"allowed_task_ids={cfg.get('allowed_task_ids')}")
     verdict = stored_isolation(cfg)
     print("  last isolation verdict: " + ("none yet (start/sync/review run the probe)" if verdict is None else
           f"ok={verdict.get('ok')} reason={verdict.get('reason')}"))
@@ -342,6 +350,11 @@ def cmd_doctor(args):
     return 0 if ok else 1
 
 
+class Proc(NamedTuple):
+    kind: str    # controller | worker | stage
+    ticks: str   # start time from /proc: the identity a later process with the same PID cannot share
+
+
 def _argv(pid):
     return [a.decode(errors="replace") for a in Path(f"/proc/{pid}/cmdline").read_bytes().split(b"\0") if a]
 
@@ -353,13 +366,21 @@ def _ppid(pid):
         return None
 
 
+def _mine(pid):
+    try:
+        return os.stat(f"/proc/{pid}").st_uid == os.geteuid()
+    except OSError:
+        return False
+
+
 def config_processes(cfg):
     """This user's processes that belong to this config, other than the
-    controller in the pid file: {pid: kind}. kind is 'controller' (one not
-    started by this CLI), 'worker', or 'stage' (a stage runner, found by the
-    lease tag in its environment; the agent side below it is reached through
-    it, sudo relaying the signal). Each process tree is listed once, by its top."""
-    me, own, registered = os.geteuid(), os.getpid(), controller_pid(cfg)
+    controller in the pid file: {pid: Proc}. A controller or worker must have
+    this config in its command line and run from this checkout; a stage runner
+    must carry a lease tag and point AIWOS_ROOT into this config's worktrees
+    (the agent side below it is reached through it, sudo relaying the signal).
+    Each process tree is listed once, by its top."""
+    own, registered = os.getpid(), controller_pid(cfg)
     cfgarg = str(Path(cfg["_config_path"]).resolve())
     worktrees = Path(cfg["state_dir"]).resolve() / "worktrees"
     found = {}
@@ -368,23 +389,28 @@ def config_processes(cfg):
             continue
         pid = int(entry)
         try:
-            if os.stat(f"/proc/{pid}").st_uid != me:
+            if not _mine(pid):
                 continue
+            ticks = process_start_ticks(pid)
             argv = _argv(pid)
-            for action, kind in (("run", "controller"), ("worker", "worker")):
+            kind = None
+            for action, name in (("run", "controller"), ("worker", "worker")):
                 expected = ["-m", "controller", action, "--config", cfgarg]
-                if any(argv[i:i + 5] == expected for i in range(len(argv) - 4)):
-                    found[pid] = kind
+                if any(argv[i:i + 5] == expected for i in range(len(argv) - 4)) \
+                        and os.readlink(f"/proc/{pid}/cwd") == str(ROOT):
+                    kind = name
                     break
-            else:
+            if kind is None:
                 env = dict(item.split(b"=", 1) for item in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
                            if b"=" in item)
                 root = env.get(b"AIWOS_ROOT", b"").decode(errors="replace")
                 if b"AIWOS_LEASE_TAG" in env and root and inside(root, worktrees):
-                    found[pid] = "stage"
+                    kind = "stage"
+            if kind and ticks and process_start_ticks(pid) == ticks:  # still the process just read
+                found[pid] = Proc(kind, ticks)
         except (OSError, ValueError):
             continue  # gone meanwhile
-    return {pid: kind for pid, kind in found.items() if _ppid(pid) not in found}
+    return {pid: p for pid, p in found.items() if _ppid(pid) not in found}
 
 
 def unsupervised(cfg):
@@ -393,40 +419,105 @@ def unsupervised(cfg):
     AI may still be working), otherwise only a second, foreign controller."""
     procs = config_processes(cfg)
     if controller_pid(cfg):
-        return {pid: kind for pid, kind in procs.items() if kind == "controller"}
+        return {pid: p for pid, p in procs.items() if p.kind == "controller"}
     return procs
 
 
 def describe(procs):
-    return ", ".join(f"{kind} {pid}" for pid, kind in sorted(procs.items()))
+    return ", ".join(f"{p.kind} {pid}" for pid, p in sorted(procs.items()))
 
 
-def wait_gone(pids, seconds):
-    from controller.store import pid_alive
-    deadline = time.time() + seconds
-    while time.time() < deadline and any(pid_alive(p) for p in pids):
-        time.sleep(0.5)
-    return [p for p in pids if pid_alive(p)]
+def open_verified(pid, ticks):
+    """A pidfd for pid, only if it is still the process seen earlier (same
+    start time, checked after the pidfd is open). A signal sent through it
+    cannot reach a later process that reuses the PID. None: gone or reused."""
+    try:
+        fd = os.pidfd_open(pid)
+    except ProcessLookupError:
+        return None
+    except (AttributeError, OSError) as exc:  # no pidfd: a plain kill could hit a reused PID
+        raise Refused(f"cannot signal processes safely without pidfd (Linux 5.3+, Python 3.9+): {exc}")
+    if not ticks or process_start_ticks(pid) != ticks:
+        os.close(fd)
+        return None
+    return fd
+
+
+def exited(fd, seconds):
+    poller = select.poll()
+    poller.register(fd, select.POLLIN)  # a pidfd becomes readable when its process exits
+    return bool(poller.poll(max(0, seconds) * 1000))
+
+
+def send(fd, sig):
+    try:
+        signal.pidfd_send_signal(fd, sig)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def my_descendants(pid):
+    """This user's processes below pid, with their start times, deepest last."""
+    children = {}
+    for entry in os.listdir("/proc"):
+        if entry.isdigit() and _mine(int(entry)):
+            ppid = _ppid(int(entry))
+            if ppid is not None:
+                children.setdefault(ppid, []).append(int(entry))
+    out, todo = [], [pid]
+    while todo:
+        for child in children.get(todo.pop(), []):
+            ticks = process_start_ticks(child)
+            if ticks:
+                out.append((child, ticks))
+                todo.append(child)
+    return out
+
+
+def stop_process(pid, proc, first, grace, escalate):
+    """Signal one verified process; with escalate, SIGKILL it and its verified
+    descendants of this user if it outlives the grace period. Returns 'gone'
+    (exited, or the PID now belongs to another process: nothing was sent),
+    'stopped', 'killed' or 'running'."""
+    fd = open_verified(pid, proc.ticks)
+    if fd is None:
+        return "gone"
+    try:
+        if not send(fd, first) or exited(fd, grace):
+            return "stopped"
+        if not escalate:
+            return "running"
+        for child, ticks in reversed(my_descendants(pid)):  # children first: they would be re-parented
+            cfd = open_verified(child, ticks)
+            if cfd is not None:
+                send(cfd, signal.SIGKILL)
+                os.close(cfd)
+        send(fd, signal.SIGKILL)
+        return "killed" if exited(fd, 10) else "running"
+    finally:
+        os.close(fd)
 
 
 def stop_leftovers(cfg):
     """Stop what a crash left running for this config, the way the controller
     stops a dead worker's stage: a controller gets SIGTERM and is waited for
     (never SIGKILL); a worker or a stage tree gets SIGTERM/SIGINT, then SIGKILL
-    after kill_grace_s. Their leased tasks return to the queue when the next
-    controller finds the lease expired."""
+    after kill_grace_s. Every signal goes through a pidfd opened and checked
+    against the start time seen when the process was identified, so a PID
+    reused meanwhile is never signalled. Their leased tasks return to the
+    queue when the next controller finds the lease expired."""
     left = unsupervised(cfg)
     if not left:
         return 0
     print(f"WARNING: running without a controller: {describe(left)} (an AI stage may have been running)")
-    controllers = [pid for pid, kind in left.items() if kind == "controller"]
-    for pid in controllers:
-        os.kill(pid, signal.SIGTERM)
-    if wait_gone(controllers, cfg["kill_grace_s"] + 60):
-        return die(f"controller not started by this CLI did not stop: {controllers}; left running", 1)
-    from controller.procs import kill_tree
-    for pid, kind in unsupervised(cfg).items():
-        kill_tree(pid, grace=cfg["kill_grace_s"], first=signal.SIGINT if kind == "stage" else signal.SIGTERM)
+    for pid, proc in left.items():
+        if proc.kind == "controller" and stop_process(pid, proc, signal.SIGTERM, cfg["kill_grace_s"] + 60,
+                                                      escalate=False) == "running":
+            return die(f"controller {pid} not started by this CLI did not stop; left running", 1)
+    for pid, proc in unsupervised(cfg).items():
+        first = signal.SIGINT if proc.kind == "stage" else signal.SIGTERM
+        stop_process(pid, proc, first, cfg["kill_grace_s"], escalate=True)
     remaining = unsupervised(cfg)
     if remaining:
         return die(f"still running, left for inspection: {describe(remaining)}", 1)
@@ -503,9 +594,13 @@ def cmd_stop(cfg):
         if pid is None:
             print("Controller not running; no controller was signalled")
         else:
-            os.kill(pid, signal.SIGTERM)
             # the controller stops its workers and their stage processes itself; never SIGKILL it
-            if wait_gone([pid], cfg["kill_grace_s"] + 60) and controller_pid(cfg):
+            # the start time recorded at start (and just verified), not one read now:
+            # a PID reused in between must not pass the check
+            recorded = json.loads(pidpath.read_text())["start_ticks"]
+            result = stop_process(pid, Proc("controller", recorded), signal.SIGTERM,
+                                  cfg["kill_grace_s"] + 60, escalate=False)
+            if result == "running":
                 return die("stop timed out; the controller was left running for inspection", 1)
             print("Controller stopped")
         pidpath.unlink(missing_ok=True)
@@ -532,6 +627,13 @@ def cmd_review(cfg, task):
         rel = source.relative_to(repo).as_posix()
         if not any(fnmatch.fnmatchcase(rel, g) for g in cfg["task_globs"]):
             return die(f"{rel} is not one of this queue's tasks (task_globs {cfg['task_globs']})")
+        try:
+            task_id = json.loads(source.read_text(encoding="utf-8")).get("task_id")
+        except (ValueError, AttributeError):
+            return die(f"{rel} is not a JSON contract")
+        from controller.config import task_allowed
+        if task_id != SMOKE_TASK_ID or not task_allowed(cfg, task_id):
+            return die(f"{rel} has task_id {str(task_id)[:60]!r}: only {SMOKE_TASK_ID} may run in the smoke test")
         refuse_if_busy(cfg, "review")  # two writers on one task
         boundary_check(cfg)
         from controller.worker import stage_env

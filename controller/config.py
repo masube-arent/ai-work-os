@@ -35,6 +35,7 @@ DEFAULTS = {
     "credential_files": [],           # files the agent user must not be able to read (token env file, gh/git config)
     "isolation_check_ttl_s": 600,     # a passed isolation probe is trusted this long
     "require_isolation": False,       # true: no AI at all until the probe passes, even with no credential present (local CLI)
+    "allowed_task_ids": None,         # list: only these task ids are queued or run (local CLI smoke test: ["DUMMY-0001"])
     "github_repo": None,              # owner/name, for the REST API (publish=github)
     "extra_path": [],                 # prepended to PATH for agents (e.g. where codex is installed)
 }
@@ -42,6 +43,12 @@ DEFAULTS = {
 
 class ConfigError(ValueError):
     pass
+
+
+def task_allowed(cfg, task_id):
+    """allowed_task_ids unset: any task. Set: only those ids, matched exactly."""
+    allowed = cfg.get("allowed_task_ids")
+    return allowed is None or (isinstance(task_id, str) and task_id in allowed)
 
 
 def load(path):
@@ -69,6 +76,10 @@ def load(path):
         raise ConfigError("agent_user and agent_group go together")
     if cfg["publish"] == "github" and not cfg["github_repo"]:
         raise ConfigError("publish=github needs github_repo (owner/name)")
+    allowed = cfg["allowed_task_ids"]
+    if allowed is not None and (not isinstance(allowed, list) or not allowed
+                                or not all(isinstance(t, str) and t for t in allowed)):
+        raise ConfigError("allowed_task_ids must be null or a non-empty list of task ids")
     if cfg["lease_ttl_s"] <= 3 * cfg["heartbeat_s"]:
         raise ConfigError("lease_ttl_s must be more than 3 x heartbeat_s")
     return cfg

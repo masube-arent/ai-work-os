@@ -41,6 +41,15 @@ PS1 = ROOT / "deploy" / "windows" / "aiwos.ps1"
 CTL, AGENT, GROUP = "aiwos-ctl", "aiwos-agent", "aiwos-ws"
 
 
+def cli_wait(cond, seconds):
+    end = time.time() + seconds
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def quiet(fn, *a, **kw):
     out, err = io.StringIO(), io.StringIO()
     with redirect_stdout(out), redirect_stderr(err):
@@ -58,7 +67,7 @@ class Tmp(unittest.TestCase):
                "model_concurrency": 1,
                "repo_dir": str(self.d / "repo"), "code_dir": str(ROOT), "_config_path": str(self.d / "local.json"),
                "publish": "none", "require_isolation": True, "agent_user": "nobody-agent",
-               "agent_group": "nobody-group", "task_globs": ["tasks/*.json", "tasks/*/*.json"], "kill_grace_s": 1}
+               "agent_group": "nobody-group", "task_globs": ["tasks/DUMMY-0001/task.json"], "allowed_task_ids": ["DUMMY-0001"], "kill_grace_s": 1}
         cfg.update(kw)
         return cfg
 
@@ -94,7 +103,8 @@ class ConfigAndPidFiles(Tmp):
         data = json.loads(cfgpath.read_text())
         self.assertEqual((data["publish"], data["require_isolation"], data["workers"], data["model_concurrency"]),
                          ("none", True, 10, 1))
-        self.assertEqual(data["task_globs"], ["tasks/*.json", "tasks/*/*.json"])  # never examples/
+        self.assertEqual(data["task_globs"], ["tasks/DUMMY-0001/task.json"])  # the dummy contract only
+        self.assertEqual(data["allowed_task_ids"], ["DUMMY-0001"])
         self.assertEqual(cfgpath.stat().st_mode & 0o777, 0o600)
         before = cfgpath.read_bytes()
         code, _, err = quiet(cli.cmd_init, ns(**parser_args))
@@ -130,20 +140,23 @@ class ConfigAndPidFiles(Tmp):
         self.assertTrue(cli.local_policy(self.cfg(agent_user=cli.current_user())))
         self.assertTrue(cli.local_policy(self.cfg(code_dir=str(self.d))))  # scripts from another checkout
 
-    def test_local_policy_insists_on_10_workers_1_model_and_tasks_only(self):
+    def test_local_policy_insists_on_10_workers_1_model_and_the_dummy_task_only(self):
+        self.assertEqual(cli.local_policy(self.cfg()), [])
         for bad in (dict(workers=9), dict(workers=1), dict(model_concurrency=2), dict(model_concurrency=0)):
             self.assertTrue(cli.local_policy(self.cfg(**bad)), bad)
-        for globs in ([], "tasks/*.json", ["examples/*/task*.json"], ["tasks/*.json", "examples/*/task*.json"],
-                      ["tasks/../examples/x.json"], ["/etc/*.json"], ["tasks/"], ["tasks\\*.json"], ["*.json"],
-                      ["tasksX/*.json"], [None]):
+        for globs in ([], "tasks/DUMMY-0001/task.json", ["tasks/*.json", "tasks/*/*.json"], ["tasks/*/task.json"],
+                      ["examples/*/task*.json"], ["tasks/DUMMY-0001/task.json", "tasks/REAL-0001/task.json"],
+                      ["tasks/../examples/x.json"], ["tasks/DUMMY-000?/task.json"], [None]):
             self.assertTrue(cli.local_policy(self.cfg(task_globs=globs)), globs)
-        self.assertEqual(cli.local_policy(self.cfg(task_globs=["tasks/DUMMY-0001/task.json"])), [])
+        for ids in (None, [], ["REAL-0001"], ["DUMMY-0001", "REAL-0001"], "DUMMY-0001", ["dummy-0001"]):
+            self.assertTrue(cli.local_policy(self.cfg(allowed_task_ids=ids)), ids)
 
     def test_start_sync_and_review_refuse_a_config_outside_the_local_policy(self):
         with mock.patch("controller.main.refresh_isolation", side_effect=AssertionError("probe must not run")), \
                 mock.patch.object(cli, "unsupervised", return_value={}), \
                 mock.patch.object(cli.subprocess, "Popen", side_effect=AssertionError("nothing may start")):
-            for bad in (self.cfg(workers=3), self.cfg(model_concurrency=2), self.cfg(task_globs=["examples/*.json"])):
+            for bad in (self.cfg(workers=3), self.cfg(model_concurrency=2), self.cfg(task_globs=["tasks/*.json"]),
+                        self.cfg(allowed_task_ids=None), self.cfg(allowed_task_ids=["REAL-0001"])):
                 for cmd in (cli.cmd_start, cli.cmd_sync):
                     with self.assertRaises(cli.Refused):
                         cmd(bad)
@@ -174,7 +187,7 @@ class ProcessSafety(Tmp):
         # at another time than the one recorded is not the controller we started
         cfg = self.cfg()
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "controller", "run",
-                                 "--config", cfg["_config_path"]])
+                                 "--config", cfg["_config_path"]], cwd=ROOT)
         self.addCleanup(lambda: (proc.kill(), proc.wait()))
         for _ in range(50):
             if cli.process_start_ticks(proc.pid):
@@ -199,7 +212,7 @@ class ProcessSafety(Tmp):
         cfg = self.cfg()
         # a stand-in whose command line is exactly what start launches
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "controller", "run",
-                                 "--config", cfg["_config_path"]])
+                                 "--config", cfg["_config_path"]], cwd=ROOT)
         self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait()))
         for _ in range(50):
             if cli.process_start_ticks(proc.pid):
@@ -212,9 +225,8 @@ class ProcessSafety(Tmp):
         self.assertIn("Controller stopped", out)
         self.assertEqual(proc.wait(timeout=10), -signal.SIGTERM)  # SIGTERM, not SIGKILL
 
-    def stand_in(self, env=None, argv=None):
-        proc = subprocess.Popen(argv or [sys.executable, "-c", "import time; time.sleep(60)"],
-                                env={**os.environ, **(env or {})})
+    def stand_in(self, env=None, argv=None, cwd=ROOT, code="import time; time.sleep(60)"):
+        proc = subprocess.Popen(argv or [sys.executable, "-c", code], env={**os.environ, **(env or {})}, cwd=cwd)
         self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait()))
         for _ in range(50):
             if cli.process_start_ticks(proc.pid):
@@ -232,19 +244,26 @@ class ProcessSafety(Tmp):
         other_cfg = self.stand_in(argv=[sys.executable, "-c", "import time; time.sleep(60)", "-m", "controller",
                                         "worker", "--config", str(self.d / "other.json"), "--id", "1"])
         other_stage = self.stand_in(env={"AIWOS_LEASE_TAG": "T-9:9", "AIWOS_ROOT": str(self.d / "elsewhere")})
+        # look-alikes: the right words in one argument, or the right argv run from another directory
+        one_arg = self.stand_in(argv=[sys.executable, "-c", "import time; time.sleep(60)",
+                                      f"-m controller worker --config {cfg['_config_path']}"])
+        elsewhere = self.stand_in(argv=[sys.executable, "-c", "import time; time.sleep(60)", "-m", "controller",
+                                        "worker", "--config", cfg["_config_path"], "--id", "2"], cwd=self.d)
         found = cli.config_processes(cfg)
-        self.assertEqual(found.get(worker.pid), "worker")
-        self.assertEqual(found.get(stage.pid), "stage")
-        self.assertNotIn(other_cfg.pid, found)
-        self.assertNotIn(other_stage.pid, found)
+        self.assertEqual(found[worker.pid].kind, "worker")
+        self.assertEqual(found[stage.pid].kind, "stage")
+        self.assertEqual(found[stage.pid].ticks, cli.process_start_ticks(stage.pid))
+        for unrelated in (other_cfg, other_stage, one_arg, elsewhere):
+            self.assertNotIn(unrelated.pid, found)
         self.assertEqual(cli.unsupervised(cfg), found)  # no controller in the pid file: all of it is unsupervised
 
     def test_stop_ends_leftovers_stage_first_with_sigint(self):
         cfg = self.cfg()
-        left = {101: "stage", 102: "worker"}
+        left = {101: cli.Proc("stage", "7"), 102: cli.Proc("worker", "8")}
         calls = []
         with mock.patch.object(cli, "unsupervised", side_effect=[left, left, {}]), \
-                mock.patch("controller.procs.kill_tree", side_effect=lambda pid, grace, first: calls.append((pid, first))):
+                mock.patch.object(cli, "stop_process",
+                                  side_effect=lambda pid, proc, first, grace, escalate: calls.append((pid, first)) or "stopped"):
             code, out, err = quiet(cli.cmd_stop, cfg)
         self.assertEqual(code, 0, err)
         self.assertIn("WARNING: running without a controller", out)
@@ -252,16 +271,73 @@ class ProcessSafety(Tmp):
 
     def test_stop_reports_what_it_could_not_end(self):
         cfg = self.cfg()
-        left = {101: "stage"}
+        left = {101: cli.Proc("stage", "7")}
         with mock.patch.object(cli, "unsupervised", return_value=left), \
-                mock.patch("controller.procs.kill_tree"):
+                mock.patch.object(cli, "stop_process", return_value="running"):
             code, _, err = quiet(cli.cmd_stop, cfg)
         self.assertEqual(code, 1)
         self.assertIn("left for inspection", err)
 
+    def test_stop_uses_the_recorded_start_time_for_the_controller(self):
+        cfg = self.cfg()
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "-m", "controller", "run",
+                                 "--config", cfg["_config_path"]], cwd=ROOT)
+        self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait()))
+        cli_wait(lambda: cli.process_start_ticks(proc.pid), 5)
+        recorded = cli.process_start_ticks(proc.pid)
+        self.write_pid(cfg, proc.pid, recorded)
+        seen = []
+        # the PID is taken over by another process right after it was verified:
+        # /proc now shows another start time, the check must still use the recorded one
+        with mock.patch.object(cli, "controller_pid", return_value=proc.pid), \
+                mock.patch.object(cli, "process_start_ticks", return_value="999999999"), \
+                mock.patch.object(cli, "stop_process", side_effect=lambda pid, p, *a, **k: seen.append(p) or "stopped"), \
+                mock.patch.object(cli, "unsupervised", return_value={}):
+            quiet(cli.cmd_stop, cfg)
+        self.assertEqual(seen, [cli.Proc("controller", recorded)])
+
+    def test_a_reused_pid_is_never_signalled(self):
+        # the process seen earlier is gone and its PID now belongs to another
+        # process of the same user: its start time differs, so nothing is sent
+        bystander = self.stand_in()
+        seen = cli.Proc("stage", str(int(cli.process_start_ticks(bystander.pid)) - 1))
+        self.assertEqual(cli.stop_process(bystander.pid, seen, signal.SIGINT, 0.5, escalate=True), "gone")
+        time.sleep(0.3)
+        self.assertIsNone(bystander.poll(), "an unrelated process was signalled")
+        cfg = self.cfg()
+        with mock.patch.object(cli, "unsupervised", side_effect=[{bystander.pid: seen}, {bystander.pid: seen}, {}]):
+            code, _, err = quiet(cli.cmd_stop, cfg)
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(bystander.poll(), "stop signalled a reused PID")
+
+    def test_signals_go_through_a_pidfd_or_not_at_all(self):
+        target = self.stand_in()
+        proc = cli.Proc("stage", cli.process_start_ticks(target.pid))
+        with mock.patch.object(cli.os, "pidfd_open", side_effect=OSError(38, "Function not implemented")):
+            with self.assertRaisesRegex(cli.Refused, "pidfd"):
+                cli.stop_process(target.pid, proc, signal.SIGINT, 0.5, escalate=True)
+        self.assertIsNone(target.poll())
+        with mock.patch.object(cli.os, "kill", side_effect=AssertionError("plain kill(2) must not be used")):
+            self.assertEqual(cli.stop_process(target.pid, proc, signal.SIGINT, 5, escalate=True), "stopped")
+        self.assertEqual(target.wait(timeout=10), -signal.SIGINT)
+
+    def test_escalates_to_sigkill_for_a_stage_that_ignores_sigint(self):
+        child_code = "import signal,time; signal.signal(signal.SIGINT, signal.SIG_IGN); time.sleep(60)"
+        code = ("import signal,subprocess,sys,time; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+                f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); time.sleep(60)")
+        top = self.stand_in(code=code)
+        time.sleep(0.5)
+        children = cli.my_descendants(top.pid)
+        self.assertEqual(len(children), 1)
+        proc = cli.Proc("stage", cli.process_start_ticks(top.pid))
+        self.assertEqual(cli.stop_process(top.pid, proc, signal.SIGINT, 0.5, escalate=True), "killed")
+        self.assertEqual(top.wait(timeout=10), -signal.SIGKILL)
+        from controller.store import pid_alive
+        self.assertTrue(cli_wait(lambda: not pid_alive(children[0][0]), 10), "the child was left running")
+
     def test_status_warns_about_unsupervised_processes(self):
         cfg = self.cfg()
-        with mock.patch.object(cli, "unsupervised", return_value={4242: "stage"}):
+        with mock.patch.object(cli, "unsupervised", return_value={4242: cli.Proc("stage", "7")}):
             code, out, _ = quiet(cli.cmd_status, cfg)
         self.assertIn("WARNING: running without a controller: stage 4242", out)
 
@@ -317,6 +393,27 @@ class ProcessSafety(Tmp):
                 code, _, err = quiet(cli.cmd_review, cfg, task)
                 self.assertEqual(code, 2, (task, err))
 
+    def test_review_runs_only_the_dummy_task_id(self):
+        cfg = self.cfg()
+        contract = Path(cfg["repo_dir"]) / "tasks" / "DUMMY-0001" / "task.json"
+        contract.parent.mkdir(parents=True)
+
+        class Reached(Exception):
+            pass
+        for task_id in ("REAL-0001", "dummy-0001", "DUMMY-0001 ", None, 1):
+            contract.write_text(json.dumps({"task_id": task_id}))
+            with mock.patch.object(cli, "boundary_check", side_effect=AssertionError("no probe for another id")):
+                code, _, err = quiet(cli.cmd_review, cfg, "tasks/DUMMY-0001/task.json")
+            self.assertEqual(code, 2, task_id)
+            self.assertIn("only DUMMY-0001", err)
+        contract.write_text("not json")
+        self.assertEqual(quiet(cli.cmd_review, cfg, "tasks/DUMMY-0001/task.json")[0], 2)
+        contract.write_text(json.dumps({"task_id": "DUMMY-0001"}))  # the real one gets as far as the probe
+        with mock.patch.object(cli, "unsupervised", return_value={}), \
+                mock.patch.object(cli, "boundary_check", side_effect=Reached):
+            with self.assertRaises(Reached):
+                cli.cmd_review(cfg, "tasks/DUMMY-0001/task.json")
+
     def test_main_refuses_root(self):
         with mock.patch.object(cli.os, "geteuid", return_value=0):
             code, _, err = quiet(cli.main, ["--config", str(self.d / "c.json"), "status"])
@@ -345,6 +442,51 @@ class RequireIsolation(Tmp):
             self.assertTrue(publishing.execution_allowed({**base, "require_isolation": True}, store)[0])
             store.set_meta(publishing.ISOLATION_KEY, {"ok": False, "reason": "probe failed"})
             self.assertFalse(publishing.execution_allowed({**base, "require_isolation": True}, store)[0])
+
+
+class AllowedTaskIds(unittest.TestCase):
+    """controller: allowed_task_ids keeps every other task out of the queue (sync)
+    and from running (worker), whatever path its contract sits at."""
+
+    def make(self, **kw):
+        from controller_harness import Sandbox
+        sb = Sandbox(**kw)
+        self.addCleanup(sb.close)
+        return sb
+
+    def test_config_validates_the_list(self):
+        from controller.config import ConfigError, load
+        d = Path(tempfile.mkdtemp(prefix="aiwos-allow-"))
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        for bad in ([], "DUMMY-0001", [""], [1]):
+            (d / "c.json").write_text(json.dumps({"repo_dir": str(d), "state_dir": str(d / "s"),
+                                                   "allowed_task_ids": bad}))
+            with self.assertRaises(ConfigError, msg=bad):
+                load(d / "c.json")
+
+    def test_sync_queues_only_allowed_ids(self):
+        sb = self.make(n_tasks=3, config={"allowed_task_ids": ["T-0002"], "publish": "none"})
+        r = sb.cli("sync-once")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(set(sb.tasks()), {"T-0002"})
+        skipped = [json.loads(e["detail"])["path"] for e in sb.events("sync_skipped")]
+        self.assertEqual(sorted(skipped), ["tasks/T-0001/task.json", "tasks/T-0003/task.json"])
+
+    def test_worker_never_runs_a_queued_task_outside_the_list(self):
+        sb = self.make(n_tasks=2, workers=2, model_concurrency=1, config={"publish": "none"})
+        self.assertEqual(sb.cli("sync-once").returncode, 0)  # both queued before the list existed
+        self.assertEqual(set(sb.tasks()), {"T-0001", "T-0002"})
+        cfg = json.loads(sb.config.read_text())
+        cfg["allowed_task_ids"] = ["T-0001"]
+        sb.config.write_text(json.dumps(cfg))
+        sb.start()
+        self.assertTrue(sb.wait_for(lambda: sb.tasks()["T-0002"]["state"] == "held", timeout=60), sb.tasks())
+        self.assertTrue(sb.wait_for(lambda: sb.tasks()["T-0001"]["ai_runs"] >= 1, timeout=120), sb.tasks())
+        sb.stop()
+        t2 = sb.tasks()["T-0002"]
+        self.assertIn("allowed_task_ids", t2["reason"])
+        self.assertEqual(t2["ai_runs"], 0)
+        self.assertFalse([c for c in sb.spy_calls() if "T-0002" in c["cwd"]], "a model ran for T-0002")
 
 
 class WslChecks(Tmp):
@@ -470,7 +612,7 @@ class LocalCliIsolated(unittest.TestCase):
     def setUp(self):
         self.build()
 
-    def build(self, dummy_task=False):
+    def build(self, dummy_task=False, dummy_path_id="DUMMY-0001", real_task=False):
         """A local bare remote and a data clone; with dummy_task, the dummy
         contract is queued and the agent CLIs are stubs (no model) whose work
         stage just sleeps, standing in for an AI that is still working."""
@@ -485,7 +627,13 @@ class LocalCliIsolated(unittest.TestCase):
         (seed / "tasks" / ".keep").write_text("")
         if dummy_task:
             (seed / "tasks" / "DUMMY-0001").mkdir()
-            shutil.copy(ROOT / "examples" / "local-cli" / "dummy-task.json", seed / "tasks" / "DUMMY-0001" / "task.json")
+            contract = json.loads((ROOT / "examples" / "local-cli" / "dummy-task.json").read_text())
+            contract["task_id"] = dummy_path_id  # another id at the dummy's path: must not run
+            (seed / "tasks" / "DUMMY-0001" / "task.json").write_text(json.dumps(contract, ensure_ascii=False))
+            if real_task:  # a real-project-looking task beside it
+                (seed / "tasks" / "REAL-0002").mkdir()
+                contract["task_id"] = "REAL-0002"
+                (seed / "tasks" / "REAL-0002" / "task.json").write_text(json.dumps(contract, ensure_ascii=False))
             bins = self.tmp / "bin"
             bins.mkdir()
             for cli_name in ("claude", "codex"):
@@ -642,6 +790,27 @@ class LocalCliIsolated(unittest.TestCase):
                         f"left: agent {self.agent_procs()} runners {self.stage_runners()}")
         r = self.cli("status")
         self.assertNotIn("WARNING", r.stdout)
+
+    def test_only_the_dummy_id_ever_reaches_a_model(self):
+        self.build(dummy_task=True, dummy_path_id="REAL-0001", real_task=True)
+        self.init()
+        self.use_stubs()
+        r = self.cli("sync")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn('"added": []', r.stdout)  # neither the disguised nor the real task is queued
+        r = self.cli("review", "tasks/DUMMY-0001/task.json")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("only DUMMY-0001", r.stderr)
+        r = self.cli("review", "tasks/REAL-0002/task.json")
+        self.assertEqual(r.returncode, 2)
+        r = self.cli("start")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        time.sleep(12)  # several sync and claim rounds (sync every 5 s, poll every 0.5 s)
+        self.assertEqual(self.agent_procs(), [], "a model process started")
+        self.assertEqual(self.stage_runners(), [])
+        r = self.cli("status")
+        self.assertIn("tasks (0):", r.stdout)
+        self.assertEqual(self.cli("stop").returncode, 0)
 
     def test_doctor_reports_without_starting_anything(self):
         self.init()
